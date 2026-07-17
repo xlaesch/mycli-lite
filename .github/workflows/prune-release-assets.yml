@@ -1,0 +1,43 @@
+name: Prune v0.2.0 release assets
+
+# One-shot: trims the existing v0.2.0 release down to the two standalone
+# runtime artifacts so it matches the current release.yml policy. It runs once
+# when first pushed to main and is safe to re-run (idempotent). Remove this
+# file after the v0.2.0 assets are confirmed pruned.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prune-release-assets.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prune-v0.2.0-assets
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Keep standalone clients only
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Remove non-client assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v0.2.0
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" \
+            --jq '.assets[] | select(.name != "mycli_lite.py" and .name != "mycli_lite_legacy.py") | .id' \
+            | while read -r asset_id; do
+                gh api --method DELETE "repos/${GH_REPO}/releases/assets/${asset_id}"
+              done
+
+          actual=$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.assets[].name' | sort)
+          expected=$(printf '%s\n' mycli_lite.py mycli_lite_legacy.py)
+          test "${actual}" = "${expected}"

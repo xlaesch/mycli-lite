@@ -1,5 +1,10 @@
 # mycli-lite
 
+[![CI](https://shieldcn.dev/github/xlaesch/mycli-lite/ci.svg?variant=outline&theme=slate&size=xs)](https://github.com/xlaesch/mycli-lite/actions/workflows/ci.yml)
+[![Release](https://shieldcn.dev/github/xlaesch/mycli-lite/release.svg?variant=outline&theme=slate&size=xs)](https://github.com/xlaesch/mycli-lite/releases/latest)
+[![Python](https://shieldcn.dev/badge/python-3.10%E2%80%933.14-3776ab.svg?variant=outline&theme=slate&size=xs)](#use)
+[![License](https://shieldcn.dev/github/xlaesch/mycli-lite/license.svg?variant=outline&theme=slate&size=xs)](LICENSE.txt)
+
 `mycli-lite` is a dependency-free, single-file MySQL client for constrained
 hosts. It provides a CLI and small synchronous library for authorized security
 testing, incident response, and administration when installing a full client is
@@ -55,31 +60,15 @@ with connect(
 
 Use `mycli_lite_legacy` instead on a legacy interpreter.
 
-## Scope and safety
+## Distribution
 
-Supported functionality includes the MySQL classic protocol, TCP and Unix
-sockets, TLS verification, native and SHA-2 authentication, RSA key exchange,
-multiple result sets, table/TSV/CSV/vertical output, and a minimal REPL.
-
-- `LOCAL INFILE`, plugins, completion, history, prepared statements, and
-  streaming cursors are intentionally omitted.
-- Results are buffered in memory, and SQL parameters are not escaped for you.
-- The default `preferred` TLS mode encrypts when available but does not prevent
-  downgrade or authenticate the server; use `verify-identity` with a trusted CA
-  when identity matters.
-- Cleartext authentication requires explicit opt-in and secure transport.
-- Python 2.7 and 3.4 reject IP literals with `verify-identity`; use a DNS name.
-- Use this software only on systems you own or are explicitly authorized to
-  assess.
+This fork is released only through GitHub. Each release attaches only the two
+standalone runtime files, `mycli_lite.py` and `mycli_lite_legacy.py`. The wheel
+and `mycli-lite` console entry point contain the modern artifact and can be built
+locally from source with `uv build`.
 
 See [docs/usage.md](docs/usage.md) for the complete CLI, library, authentication,
 and compatibility reference.
-
-## Distribution
-
-This fork is released only through GitHub. The wheel and installed `mycli-lite`
-command contain the modern artifact; source archives and GitHub releases contain
-both standalone files.
 
 Derived from [mycli](https://github.com/dbcli/mycli), with a deliberately smaller
 scope and independent implementation. See [ATTRIBUTION.md](ATTRIBUTION.md) and

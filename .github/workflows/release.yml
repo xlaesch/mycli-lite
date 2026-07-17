@@ -71,11 +71,6 @@ jobs:
           entry_points=$(grep '/entry_points.txt$' /tmp/wheel-files)
           unzip -p "${wheel}" "${entry_points}" | grep -Fxq 'mycli-lite = mycli_lite:_main_entrypoint'
 
-      - name: Create checksums
-        run: |
-          sha256sum mycli_lite.py mycli_lite_legacy.py LICENSE.txt ATTRIBUTION.md > SHA256SUMS
-          (cd dist && sha256sum * >> ../SHA256SUMS)
-
       - name: Extract release notes
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -91,12 +86,8 @@ jobs:
         with:
           name: release-artifacts
           path: |
-            dist/*
             mycli_lite.py
             mycli_lite_legacy.py
-            LICENSE.txt
-            ATTRIBUTION.md
-            SHA256SUMS
             RELEASE_NOTES.md
           if-no-files-found: error
 
@@ -120,10 +111,6 @@ jobs:
           assets=(
             release-artifacts/mycli_lite.py
             release-artifacts/mycli_lite_legacy.py
-            release-artifacts/LICENSE.txt
-            release-artifacts/ATTRIBUTION.md
-            release-artifacts/SHA256SUMS
-            release-artifacts/dist/*
           )
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber

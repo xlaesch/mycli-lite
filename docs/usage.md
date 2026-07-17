@@ -262,5 +262,6 @@ $ python3 -I -S ./mycli_lite.py -h db.internal -u analyst -p \
 ```
 
 Recompute and compare the SHA-256 of whichever artifact was transferred to
-detect truncation or modification. GitHub release `SHA256SUMS` files cover both
-standalone artifacts, both distributions, the license, and attribution.
+detect truncation or modification. Each GitHub release attaches only the two
+standalone runtime artifacts, so compute the digest over the downloaded asset
+before use.

@@ -58,10 +58,12 @@ and 3.4 through 3.9. Keep the checkout read-only and disable networking for
 offline legacy tests.
 
 Before a release, verify the wheel contains only `mycli_lite.py`, distribution
-metadata, the console entry point, and the licenses. The source archive and
-GitHub release must contain both runtime files, and `SHA256SUMS` must cover both.
-Test the modern raw artifact with `python -I -S` and the legacy raw artifact with
-`python -B -E -s -S` to prove neither imports site packages.
+metadata, the console entry point, and the licenses. The GitHub release must
+attach only the two standalone runtime files, `mycli_lite.py` and
+`mycli_lite_legacy.py`; do not attach the wheel, source archive, checksums, or
+license files as release assets. Test the modern raw artifact with `python -I -S`
+and the legacy raw artifact with `python -B -E -s -S` to prove neither imports
+site packages.
 
 This fork publishes GitHub releases only. Preserve the
 `Private :: Do Not Upload` classifier and do not add package-index publishing.
