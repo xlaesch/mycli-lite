@@ -36,14 +36,15 @@ MANIFEST.in                Legacy source-archive inclusion boundary.
 - Do not restore dependencies or functionality from full mycli unless it fits
   the single-file scope.
 
-Use uv for Python commands:
+Install the development tooling, then run the standard checks:
 
 ```bash
-uv run -- pytest -m 'not live'
-uv run -- ruff check .
-uv run -- ruff format .
-uv run -- mypy mycli_lite.py tests
-uv build
+python -m pip install -r requirements-dev.txt
+python -m pytest -m 'not live'
+ruff check .
+ruff format .
+mypy mycli_lite.py tests
+python -m build
 ```
 
 Run the legacy unit suite with a target interpreter:

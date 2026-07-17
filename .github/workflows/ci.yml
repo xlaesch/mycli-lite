@@ -20,23 +20,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: '0.11.29'
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install development dependencies
-        run: uv sync --frozen --group dev --python ${{ matrix.python-version }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
 
       - name: Run unit tests
-        run: uv run --frozen --python ${{ matrix.python-version }} -- pytest -m 'not live'
+        run: python -m pytest -m 'not live'
 
       - name: Test the standalone artifact
         run: |
-          uv run --frozen --python ${{ matrix.python-version }} -- python -I -S mycli_lite.py --version
-          uv run --frozen --python ${{ matrix.python-version }} -- python -I -S mycli_lite.py --help >/dev/null
+          python -I -S mycli_lite.py --version
+          python -I -S mycli_lite.py --help >/dev/null
 
   quality-and-build:
     name: Quality and distribution
@@ -44,18 +43,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: '0.11.29'
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.14'
 
-      - run: uv sync --frozen --group dev
-      - run: uv run --frozen -- ruff check .
-      - run: uv run --frozen -- ruff format --check .
-      - run: uv run --frozen -- mypy mycli_lite.py tests
-      - run: uv build
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy mycli_lite.py tests
+      - run: python -m build
 
       - name: Verify distribution contents and dependencies
         run: |
@@ -85,8 +84,9 @@ jobs:
 
       - name: Install and run the wheel
         run: |
-          uv venv .wheel-venv --python 3.14
-          uv pip install --python .wheel-venv/bin/python --no-deps dist/*.whl
+          python -m venv .wheel-venv
+          .wheel-venv/bin/python -m pip install --upgrade pip
+          .wheel-venv/bin/python -m pip install --no-deps dist/*.whl
           .wheel-venv/bin/mycli-lite --version
           .wheel-venv/bin/python - <<'PY'
           import os
@@ -167,13 +167,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: '0.11.29'
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.14'
-      - run: uv sync --frozen --group dev
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
       - name: Run live protocol smoke test
         env:
           MYCLI_LITE_TEST_HOST: 127.0.0.1
@@ -182,7 +182,7 @@ jobs:
           MYCLI_LITE_TEST_PASSWORD: root
           MYCLI_LITE_TEST_DATABASE: mycli_test
           MYCLI_LITE_TEST_GET_SERVER_PUBLIC_KEY: '1'
-        run: uv run --frozen -- pytest -m live
+        run: python -m pytest -m live
 
   legacy-live-mysql:
     name: Legacy Python ${{ matrix.python-version }} MySQL smoke test

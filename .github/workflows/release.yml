@@ -15,18 +15,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: '0.11.29'
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.14'
 
-      - run: uv sync --frozen --group dev
-      - run: uv run --frozen -- pytest -m 'not live'
-      - run: uv run --frozen -- ruff check .
-      - run: uv run --frozen -- ruff format --check .
-      - run: uv run --frozen -- mypy mycli_lite.py tests
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -m 'not live'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy mycli_lite.py tests
 
       - name: Test the legacy artifact on CPython 2.7.18
         run: |
@@ -42,14 +42,14 @@ jobs:
 
       - name: Require tag and artifact versions to match
         run: |
-          version=$(uv run --frozen -- python -c 'import mycli_lite; print(mycli_lite.__version__)')
-          legacy_version=$(uv run --frozen -- python -c 'import pathlib, re; versions = re.findall(r"^__version__ = [\x27\x22]([^\x27\x22]+)[\x27\x22]$", pathlib.Path("mycli_lite_legacy.py").read_text(encoding="utf-8"), re.MULTILINE); assert len(versions) == 1; print(versions[0])')
+          version=$(python -c 'import mycli_lite; print(mycli_lite.__version__)')
+          legacy_version=$(python -c 'import pathlib, re; versions = re.findall(r"^__version__ = [\x27\x22]([^\x27\x22]+)[\x27\x22]$", pathlib.Path("mycli_lite_legacy.py").read_text(encoding="utf-8"), re.MULTILINE); assert len(versions) == 1; print(versions[0])')
           test "${GITHUB_REF_NAME}" = "v${version}"
           test "${legacy_version}" = "${version}"
 
       - name: Build distributions
         run: |
-          uv build
+          python -m build
 
       - name: Verify distribution boundaries
         run: |

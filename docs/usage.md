@@ -244,7 +244,7 @@ $ python -B -E -s -S ./mycli_lite_legacy.py --help >/dev/null
 The repository unit tests use scripted sockets and cover packet framing, length-encoded fields, authentication scrambles and RSA OAEP, a full handshake/query/quit exchange, multiple results, LOCAL INFILE rejection, output escaping, REPL statement termination, and standard-library-only imports:
 
 ```console
-$ uv run -- pytest -q tests/test_mycli_lite.py
+$ python -m pytest -q tests/test_mycli_lite.py
 ```
 
 The dependency-free legacy suite runs with the target interpreter itself:

@@ -55,7 +55,7 @@ Use `mycli_lite_legacy` instead on a legacy interpreter.
 This fork is released only through GitHub. Each release attaches only the two
 standalone runtime files, `mycli_lite.py` and `mycli_lite_legacy.py`. The wheel
 and `mycli-lite` console entry point contain the modern artifact and can be built
-locally from source with `uv build`.
+locally from source with `python -m build`.
 
 See [docs/usage.md](docs/usage.md) for the complete CLI, library, authentication,
 and compatibility reference.
