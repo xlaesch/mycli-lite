@@ -778,7 +778,7 @@ class ReplSlashCommandTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_dump_to_stdout_produces_portable_sql_and_skips_system_databases(self):
+    def test_dump_to_stdout_renders_tables_and_skips_system_databases(self):
         tmpdir = tempfile.mkdtemp()
         os.chdir(tmpdir)
         try:
@@ -787,26 +787,14 @@ class ReplSlashCommandTests(unittest.TestCase):
                 legacy._handle_repl_command(connection, self._arguments(), u'\\dump'), True
             )
             dump = self._stdout.getvalue()
-            self.assertIn(u'CREATE DATABASE IF NOT EXISTS `application`;', dump)
-            self.assertIn(u'USE `application`;', dump)
-            self.assertNotIn(u'CREATE DATABASE IF NOT EXISTS `mysql`;', dump)
+            self.assertTrue(dump.startswith(u'-- mycli-lite table dump\n'))
+            self.assertIn(u'-- Database: application\n', dump)
+            self.assertIn(u'-- Table: application.users\n', dump)
+            self.assertNotIn(u'-- Database: mysql', dump)
             self.assertNotIn(u'information_schema', dump)
-            self.assertIn(u'DROP TABLE IF EXISTS `application`.`users`;', dump)
-            self.assertIn(
-                u'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB;',
-                dump,
-            )
-            self.assertIn(
-                u"INSERT INTO `application`.`users` (`id`, `username`, `secret`) "
-                u"VALUES ('1', 'al\"ice', X'00ff');",
-                dump,
-            )
-            self.assertIn(
-                u"INSERT INTO `application`.`users` (`id`, `username`, `secret`) "
-                u"VALUES ('2', 'bo\\'b', NULL);",
-                dump,
-            )
-            self.assertTrue(dump.endswith(u'SET FOREIGN_KEY_CHECKS=1;\n'))
+            self.assertIn(u'| id | username | secret |', dump)
+            self.assertIn(u'| 1  | al"ice   | 0x00ff |', dump)
+            self.assertIn(u'| 2  | bo\'b     | NULL   |', dump)
             self.assertNotIn(u'Wrote dump to', self._stderr.getvalue())
             self.assertFalse(os.path.exists(os.path.join(tmpdir, u'loot')))
         finally:
@@ -818,16 +806,16 @@ class ReplSlashCommandTests(unittest.TestCase):
         try:
             connection = _ReplFakeConnection(_dump_responses())
             self.assertIs(
-                legacy._handle_repl_command(connection, self._arguments(), u'\\dump dump.sql'),
+                legacy._handle_repl_command(connection, self._arguments(), u'\\dump dump.txt'),
                 True,
             )
-            dump_path = os.path.join(tmpdir, u'dump.sql')
+            dump_path = os.path.join(tmpdir, u'dump.txt')
             with io.open(dump_path, encoding=u'utf-8') as handle:
                 dump = handle.read()
-            self.assertIn(u'CREATE DATABASE IF NOT EXISTS `application`;', dump)
-            self.assertIn(u'INSERT INTO `application`.`users`', dump)
+            self.assertIn(u'-- Database: application', dump)
+            self.assertIn(u'| username |', dump)
             self.assertEqual(self._stdout.getvalue(), u'')
-            self.assertIn(u'Wrote dump to dump.sql', self._stderr.getvalue())
+            self.assertIn(u'Wrote dump to dump.txt', self._stderr.getvalue())
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -838,13 +826,13 @@ class ReplSlashCommandTests(unittest.TestCase):
             connection = _ReplFakeConnection(_dump_responses())
             self.assertIs(
                 legacy._handle_repl_command(
-                    connection, self._arguments(), u'\\dump missing/dump.sql'
+                    connection, self._arguments(), u'\\dump missing/dump.txt'
                 ),
                 True,
             )
             self.assertFalse(os.path.exists(os.path.join(tmpdir, u'missing')))
             self.assertEqual(self._stdout.getvalue(), u'')
-            self.assertIn(u'ERROR: cannot write missing/dump.sql', self._stderr.getvalue())
+            self.assertIn(u'ERROR: cannot write missing/dump.txt', self._stderr.getvalue())
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -860,13 +848,12 @@ class ReplSlashCommandTests(unittest.TestCase):
                 return _ReplFakeConnection.query(connection, sql)
 
             connection.query = query
-            legacy._handle_repl_command(connection, self._arguments(), u'\\dump blocked.sql')
-            dump_path = os.path.join(tmpdir, u'blocked.sql')
+            legacy._handle_repl_command(connection, self._arguments(), u'\\dump blocked.txt')
+            dump_path = os.path.join(tmpdir, u'blocked.txt')
             with io.open(dump_path, encoding=u'utf-8') as handle:
                 dump = handle.read()
             self.assertIn(u'-- cannot SELECT from application.users:', dump)
-            self.assertNotIn(u'INSERT INTO', dump)
-            self.assertIn(u'SET FOREIGN_KEY_CHECKS=1;', dump)
+            self.assertNotIn(u'| username |', dump)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -881,12 +868,6 @@ class ReplSlashCommandTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(connection.connected)
         self.assertIn(u'ERROR: 1064 [42000]', self._stderr.getvalue())
-
-    def test_sql_literal_escapes_special_values(self):
-        self.assertEqual(legacy._sql_literal(None), u'NULL')
-        self.assertEqual(legacy._sql_literal(b'\x00\xff'), u"X'00ff'")
-        self.assertEqual(legacy._sql_literal(u"a'b\nc\\d"), u"'a\\'b\\nc\\\\d'")
-        self.assertEqual(legacy._sql_literal(u'plain'), u"'plain'")
 
 
 class _ReplFakeConnection(object):
@@ -928,8 +909,6 @@ def _dump_responses():
     def text_column(name):
         return legacy.Column(name, u'', u'', u'', u'', 45, 0xFD, 0)
 
-    int_column = legacy.Column(u'id', u'', u'', u'', u'', 3, 0x03, 0)
-    blob_column = legacy.Column(u'secret', u'', u'', u'', u'', 253, 0xFC, 0)
     return {
         u'SHOW DATABASES;': [legacy.Result(columns=(text_column(u'Database'),), rows=[
             (u'application',), (u'mysql',), (u'information_schema',), (u'sys',),
@@ -937,12 +916,8 @@ def _dump_responses():
         u'SHOW TABLES FROM': [legacy.Result(columns=(text_column(u'Tables_in_application'),), rows=[
             (u'users',),
         ])],
-        u'SHOW CREATE TABLE': [legacy.Result(
-            columns=(text_column(u'Table'), text_column(u'Create Table')),
-            rows=[(u'users', u'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB')],
-        )],
         u'SELECT * FROM': [legacy.Result(
-            columns=(int_column, text_column(u'username'), blob_column),
+            columns=(text_column(u'id'), text_column(u'username'), text_column(u'secret')),
             rows=[(u'1', u'al"ice', b'\x00\xff'), (u'2', u"bo'b", None)],
         )],
     }

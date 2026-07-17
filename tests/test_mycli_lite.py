@@ -887,8 +887,6 @@ def _dump_responses() -> dict[str, list[mycli_lite.Result]]:
     def text_column(name: str) -> mycli_lite.Column:
         return mycli_lite.Column(name, '', '', '', '', 45, 0xFD, 0)
 
-    int_column = mycli_lite.Column('id', '', '', '', '', 3, 0x03, 0)
-    blob_column = mycli_lite.Column('secret', '', '', '', '', 253, 0xFC, 0)
     return {
         'SHOW DATABASES;': [
             mycli_lite.Result(
@@ -909,38 +907,31 @@ def _dump_responses() -> dict[str, list[mycli_lite.Result]]:
                 ],
             )
         ],
-        'SHOW CREATE TABLE': [
-            mycli_lite.Result(
-                columns=(text_column('Table'), text_column('Create Table')),
-                rows=[('users', 'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB')],
-            )
-        ],
         'SELECT * FROM': [
             mycli_lite.Result(
-                columns=(int_column, text_column('username'), blob_column),
+                columns=(text_column('id'), text_column('username'), text_column('secret')),
                 rows=[('1', 'al"ice', b'\x00\xff'), ('2', "bo'b", None)],
             )
         ],
     }
 
 
-def test_repl_dump_to_stdout_produces_portable_sql(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_repl_dump_to_stdout_renders_tables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.chdir(tmp_path)
     connection = _ReplFakeConnection(_dump_responses())
     assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump') is True
     captured = capsys.readouterr()
     dump = captured.out
-    assert 'CREATE DATABASE IF NOT EXISTS `application`;' in dump
-    assert 'USE `application`;' in dump
-    assert 'CREATE DATABASE IF NOT EXISTS `mysql`;' not in dump
+    assert dump.startswith('-- mycli-lite table dump\n')
+    assert '-- Database: application\n' in dump
+    assert '-- Table: application.users\n' in dump
+    # System databases are skipped entirely.
+    assert '-- Database: mysql' not in dump
     assert 'information_schema' not in dump
-    assert 'DROP TABLE IF EXISTS `application`.`users`;' in dump
-    assert 'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB;' in dump
-    assert "INSERT INTO `application`.`users` (`id`, `username`, `secret`) VALUES ('1', 'al\"ice', X'00ff');" in dump
-    assert "INSERT INTO `application`.`users` (`id`, `username`, `secret`) VALUES ('2', 'bo\\'b', NULL);" in dump
-    assert dump.endswith('SET FOREIGN_KEY_CHECKS=1;\n')
+    # The rows render through the table writer with column headers and escaped cells.
+    assert '| id | username | secret |' in dump
+    assert '| 1  | al"ice   | 0x00ff |' in dump
+    assert '| 2  | bo\'b     | NULL   |' in dump
     assert 'Wrote dump to' not in captured.err
     assert not (tmp_path / 'loot').exists()
 
@@ -948,15 +939,15 @@ def test_repl_dump_to_stdout_produces_portable_sql(
 def test_repl_dump_to_file_writes_named_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.chdir(tmp_path)
     connection = _ReplFakeConnection(_dump_responses())
-    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump dump.sql') is True
-    dump_file = tmp_path / 'dump.sql'
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump dump.txt') is True
+    dump_file = tmp_path / 'dump.txt'
     assert dump_file.exists()
     dump = dump_file.read_text(encoding='utf-8')
-    assert 'CREATE DATABASE IF NOT EXISTS `application`;' in dump
-    assert "INSERT INTO `application`.`users`" in dump
+    assert '-- Database: application' in dump
+    assert '| username |' in dump
     captured = capsys.readouterr()
     assert captured.out == ''
-    assert 'Wrote dump to dump.sql' in captured.err
+    assert 'Wrote dump to dump.txt' in captured.err
 
 
 def test_repl_dump_to_missing_directory_reports_error(
@@ -964,11 +955,11 @@ def test_repl_dump_to_missing_directory_reports_error(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     connection = _ReplFakeConnection(_dump_responses())
-    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump missing/dump.sql') is True
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump missing/dump.txt') is True
     assert not (tmp_path / 'missing').exists()
     captured = capsys.readouterr()
     assert captured.out == ''
-    assert 'ERROR: cannot write missing/dump.sql' in captured.err
+    assert 'ERROR: cannot write missing/dump.txt' in captured.err
 
 
 def test_repl_dump_records_unreadable_table_as_comment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -981,11 +972,11 @@ def test_repl_dump_records_unreadable_table_as_comment(tmp_path: Path, monkeypat
         return _ReplFakeConnection.query(connection, sql)
 
     connection.query = query  # type: ignore[method-assign]
-    mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump blocked.sql')
-    dump = (tmp_path / 'blocked.sql').read_text(encoding='utf-8')
+    mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump blocked.txt')
+    dump = (tmp_path / 'blocked.txt').read_text(encoding='utf-8')
     assert '-- cannot SELECT from application.users:' in dump
-    assert 'INSERT INTO' not in dump
-    assert 'SET FOREIGN_KEY_CHECKS=1;' in dump
+    # No data rows are rendered for the blocked table.
+    assert '| username |' not in dump
 
 
 def test_repl_execute_query_swallows_server_error_but_keeps_connection(
@@ -1002,10 +993,3 @@ def test_repl_execute_query_swallows_server_error_but_keeps_connection(
     assert connection.connected is True
     captured = capsys.readouterr()
     assert 'ERROR: 1064 [42000]' in captured.err
-
-
-def test_sql_literal_escapes_special_values() -> None:
-    assert mycli_lite._sql_literal(None) == 'NULL'
-    assert mycli_lite._sql_literal(b'\x00\xff') == "X'00ff'"
-    assert mycli_lite._sql_literal("a'b\nc\\d") == "'a\\'b\\nc\\\\d'"
-    assert mycli_lite._sql_literal('plain') == "'plain'"

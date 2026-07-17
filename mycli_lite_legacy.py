@@ -1700,26 +1700,6 @@ def _quote_identifier(name):
     return u'`' + name.replace(u'`', u'``') + u'`'
 
 
-def _sql_literal(value):
-    if value is None:
-        return u'NULL'
-    if isinstance(value, bytearray):
-        return u"X'" + binascii.hexlify(bytes(value)).decode(u'ascii') + u"'"
-    if isinstance(value, binary_type):
-        return u"X'" + binascii.hexlify(value).decode(u'ascii') + u"'"
-    text = _ensure_text(value)
-    return (
-        u"'"
-        + text.replace(u'\\', u'\\\\')
-        .replace(u"'", u"\\'")
-        .replace(u'\n', u'\\n')
-        .replace(u'\r', u'\\r')
-        .replace(u'\0', u'\\0')
-        .replace(u'\x1a', u'\\Z')
-        + u"'"
-    )
-
-
 def _parse_qualified_name(arg):
     parts = [part.strip().strip(u'`') for part in arg.split(u'.')]
     if len(parts) == 1:
@@ -1822,99 +1802,68 @@ def _loot_query(connection, sql, arguments):
     _emit(sys.stderr, u'Wrote {0} row(s) to {1}'.format(total, path))
 
 
-def _dump_table(connection, output, database, table):
+def _dump_table(connection, output, database, table, arguments):
+    _emit(output, u'-- Table: {0}.{1}'.format(database, table))
     qualified = u'{0}.{1}'.format(_quote_identifier(database), _quote_identifier(table))
-    _emit(output, u'-- Table structure for table {0}.{1}'.format(database, table))
-    _emit(output, u'DROP TABLE IF EXISTS {0};'.format(qualified))
     try:
-        create_results = connection.query(u'SHOW CREATE TABLE {0};'.format(qualified))
-    except MySQLError as error:
-        _emit(output, u'-- cannot read CREATE TABLE for {0}.{1}: {2}'.format(
-            database, table, _exception_text(error)))
-        return
-    for result in create_results:
-        for row in result.rows:
-            if len(row) >= 2 and row[1]:
-                statement = row[1] if isinstance(row[1], text_type) else _ensure_text(row[1])
-                _emit(output, statement.rstrip(u';').rstrip() + u';')
-    _emit(output)
-    _emit(output, u'-- Dumping data for table {0}.{1}'.format(database, table))
-    try:
-        data_results = connection.query(u'SELECT * FROM {0};'.format(qualified))
+        results = connection.query(u'SELECT * FROM {0};'.format(qualified))
     except MySQLError as error:
         _emit(output, u'-- cannot SELECT from {0}.{1}: {2}'.format(
             database, table, _exception_text(error)))
+        _emit(output)
         return
-    columns = []
-    rows = []
-    for result in data_results:
-        if result.columns and not columns:
-            columns = list(result.columns)
-        if result.rows:
-            rows.extend(result.rows)
-    if not columns or not rows:
-        _emit(output, '-- (no rows)')
-        return
-    column_list = u', '.join(_quote_identifier(column.name) for column in columns)
-    for row in rows:
-        values = u', '.join(_sql_literal(value) for value in row)
-        _emit(output, u'INSERT INTO {0} ({1}) VALUES ({2});'.format(qualified, column_list, values))
-
-
-def _dump_database(connection, output, database):
-    quoted_db = _quote_identifier(database)
-    _emit(output, u'-- Database: {0}'.format(database))
-    _emit(output, u'CREATE DATABASE IF NOT EXISTS {0};'.format(quoted_db))
-    _emit(output, u'USE {0};'.format(quoted_db))
+    write_results(
+        results,
+        output_format=u'table',
+        output=output,
+        show_headers=True,
+        show_status=False,
+        null_value=arguments.null,
+    )
     _emit(output)
+
+
+def _dump_database(connection, output, database, arguments):
+    _emit(output, u'-- Database: {0}'.format(database))
+    _emit(output)
+    quoted_db = _quote_identifier(database)
     try:
         table_results = connection.query(u'SHOW TABLES FROM {0};'.format(quoted_db))
     except MySQLError as error:
         _emit(output, u'-- cannot list tables in {0}: {1}'.format(database, _exception_text(error)))
         _emit(output)
         return
-    tables = []
     for result in table_results:
         for row in result.rows:
             if row and row[0] is not None:
-                name = row[0] if isinstance(row[0], text_type) else _ensure_text(row[0])
-                tables.append(name)
-    for table in tables:
-        _dump_table(connection, output, database, table)
-        _emit(output)
+                table = row[0] if isinstance(row[0], text_type) else _ensure_text(row[0])
+                _dump_table(connection, output, database, table, arguments)
 
 
-def _dump_connection(connection, output):
-    """Write a portable SQL dump of accessible user databases to output."""
-    _emit(output, '-- mycli-lite database dump')
+def _dump_connection(connection, output, arguments):
+    """Render every accessible user database's tables as formatted tables."""
+    _emit(output, '-- mycli-lite table dump')
     _emit(output, u'-- Generated: {0}'.format(time.strftime(u'%Y-%m-%d %H:%M:%S')))
     _emit(output, u'-- Server: {0}'.format(connection.server_version))
-    _emit(output)
-    _emit(output, 'SET NAMES utf8mb4;')
-    _emit(output, 'SET FOREIGN_KEY_CHECKS=0;')
     _emit(output)
     try:
         db_results = connection.query('SHOW DATABASES;')
     except MySQLError as error:
         _emit(output, u'-- cannot list databases: {0}'.format(_exception_text(error)))
         return
-    databases = []
     for result in db_results:
         for row in result.rows:
             if row and row[0] is not None:
                 name = row[0] if isinstance(row[0], text_type) else _ensure_text(row[0])
                 if name not in _SYSTEM_DATABASES:
-                    databases.append(name)
-    for database in databases:
-        _dump_database(connection, output, database)
-    _emit(output, 'SET FOREIGN_KEY_CHECKS=1;')
+                    _dump_database(connection, output, name, arguments)
 
 
-def _dump_repl(connection, path=None):
-    """Write a portable SQL dump to stdout (path is None) or to the given file."""
+def _dump_repl(connection, arguments, path=None):
+    """Render the dump to stdout (path is None) or to the given file."""
     if path is None:
         try:
-            _dump_connection(connection, sys.stdout)
+            _dump_connection(connection, sys.stdout, arguments)
         except KeyboardInterrupt:
             connection.close()
             _emit(sys.stderr, 'Dump interrupted; the connection was closed.')
@@ -1926,7 +1875,7 @@ def _dump_repl(connection, path=None):
     try:
         handle = io.open(path, u'w', encoding=u'utf-8', newline=u'')
         try:
-            _dump_connection(connection, handle)
+            _dump_connection(connection, handle, arguments)
         finally:
             handle.close()
     except KeyboardInterrupt:
@@ -2021,7 +1970,7 @@ def _handle_repl_command(connection, arguments, stripped):
         return True
     if stripped == u'\\dump' or stripped.startswith(u'\\dump '):
         path = stripped[len(u'\\dump'):].strip() or None
-        _dump_repl(connection, path)
+        _dump_repl(connection, arguments, path)
         return True
     return False
 
