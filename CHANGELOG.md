@@ -4,6 +4,21 @@ All notable changes to mycli-lite are documented here.
 
 ## Unreleased
 
+### Added
+
+- Interactive REPL reconnaissance slash commands: `\whoami`, `\serverinfo`,
+  `\privs`, `\dbs`, `\tables [DB]`, `\columns DB.TABLE|TABLE`, `\loot SQL`,
+  and `\dump [PATH]`. `\loot` writes query results to numbered TSV files
+  under `./loot/`; `\dump` writes a portable SQL dump of accessible user
+  databases to stdout, or to `PATH` when one is given, skipping the system
+  catalogs.
+
+### Changed
+
+- Refactored the interactive REPL loop to dispatch slash commands through a
+  single helper and to run statement execution through a shared query helper,
+  preserving the existing exit codes for interrupts and lost connections.
+
 ## 0.2.0 - 2026-07-17
 
 ### Added

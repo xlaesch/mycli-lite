@@ -1318,11 +1318,328 @@ def _repl_terminator(sql: str) -> tuple[str, bool] | None:
     return None
 
 
+_SYSTEM_DATABASES = frozenset({'information_schema', 'performance_schema', 'mysql', 'sys', 'ndbinfo'})
+
+_SERVERINFO_SQL = (
+    'SELECT VERSION() AS version, @@hostname AS hostname, @@version_comment AS version_comment, '
+    '@@version_compile_os AS compile_os, @@version_compile_machine AS compile_machine, '
+    '@@datadir AS datadir, @@port AS port, @@socket AS socket, '
+    '@@secure_file_priv AS secure_file_priv;'
+)
+
+
+class _ReplExit(Exception):
+    """Internal signal to leave the REPL with a specific exit code."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _quote_identifier(name: str) -> str:
+    return '`' + name.replace('`', '``') + '`'
+
+
+def _sql_literal(value: Cell) -> str:
+    if value is None:
+        return 'NULL'
+    if isinstance(value, bytes | bytearray):
+        return "X'" + bytes(value).hex() + "'"
+    text = str(value)
+    return (
+        "'"
+        + text
+        .replace('\\', '\\\\')
+        .replace("'", "\\'")
+        .replace('\n', '\\n')
+        .replace('\r', '\\r')
+        .replace('\0', '\\0')
+        .replace('\x1a', '\\Z')
+        + "'"
+    )
+
+
+def _parse_qualified_name(arg: str) -> tuple[str | None, str]:
+    parts = [part.strip().strip('`') for part in arg.split('.')]
+    if len(parts) == 1:
+        return None, parts[0]
+    return parts[0], parts[1]
+
+
+def _next_loot_path(extension: str) -> str:
+    if not os.path.isdir('loot'):
+        os.makedirs('loot')
+    index = 1
+    while True:
+        candidate = os.path.join('loot', f'loot_{index:03d}.{extension}')
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
+
+def _execute_repl_query(
+    connection: Connection,
+    sql: str,
+    arguments: argparse.Namespace,
+    *,
+    vertical: bool = False,
+) -> list[Result] | None:
+    """Run SQL, render results, and report errors for the interactive REPL."""
+    started = time.monotonic()
+    try:
+        results = connection.query(sql)
+    except KeyboardInterrupt:
+        connection.close()
+        print('Query interrupted; the connection was closed.', file=sys.stderr)
+        raise _ReplExit(130) from None
+    except MySQLError as exc:
+        print(f'ERROR: {_escape_text(str(exc))}', file=sys.stderr)
+        if not connection.connected:
+            raise _ReplExit(5) from None
+        return None
+    output_format = 'vertical' if vertical else arguments.output_format
+    if output_format == 'auto':
+        output_format = 'table'
+    write_results(
+        results,
+        output_format=output_format,
+        show_headers=not arguments.skip_column_names,
+        show_status=True,
+        null_value=arguments.null,
+    )
+    print(f'{time.monotonic() - started:.3f} sec', file=sys.stderr)
+    return results
+
+
+def _loot_query(connection: Connection, sql: str, arguments: argparse.Namespace) -> None:
+    """Run SQL and write the rows to a numbered TSV file under ./loot/."""
+    try:
+        results = connection.query(sql)
+    except KeyboardInterrupt:
+        connection.close()
+        print('Query interrupted; the connection was closed.', file=sys.stderr)
+        raise _ReplExit(130) from None
+    except MySQLError as exc:
+        print(f'ERROR: {_escape_text(str(exc))}', file=sys.stderr)
+        return
+    try:
+        path = _next_loot_path('tsv')
+    except OSError as exc:
+        print(f'ERROR: cannot create loot directory: {exc}', file=sys.stderr)
+        return
+    try:
+        with open(path, 'w', encoding='utf-8', newline='') as handle:
+            write_results(
+                results,
+                output_format='tsv',
+                output=handle,
+                show_headers=True,
+                show_status=False,
+                null_value=arguments.null,
+            )
+    except OSError as exc:
+        print(f'ERROR: cannot write {path}: {exc}', file=sys.stderr)
+        return
+    total = sum(len(result.rows) for result in results if result.columns)
+    print(f'Wrote {total} row(s) to {path}', file=sys.stderr)
+
+
+def _dump_table(connection: Connection, output: TextIO, database: str, table: str) -> None:
+    qualified = f'{_quote_identifier(database)}.{_quote_identifier(table)}'
+    print(f'-- Table structure for table {database}.{table}', file=output)
+    print(f'DROP TABLE IF EXISTS {qualified};', file=output)
+    try:
+        create_results = connection.query(f'SHOW CREATE TABLE {qualified};')
+    except MySQLError as exc:
+        print(f'-- cannot read CREATE TABLE for {database}.{table}: {exc}', file=output)
+        return
+    for result in create_results:
+        for row in result.rows:
+            if len(row) >= 2 and row[1]:
+                statement = row[1] if isinstance(row[1], str) else str(row[1])
+                print(statement.rstrip(';').rstrip() + ';', file=output)
+    print(file=output)
+    print(f'-- Dumping data for table {database}.{table}', file=output)
+    try:
+        data_results = connection.query(f'SELECT * FROM {qualified};')
+    except MySQLError as exc:
+        print(f'-- cannot SELECT from {database}.{table}: {exc}', file=output)
+        return
+    columns: list[Column] = []
+    rows: list[tuple[Cell, ...]] = []
+    for result in data_results:
+        if result.columns and not columns:
+            columns = list(result.columns)
+        if result.rows:
+            rows.extend(result.rows)
+    if not columns or not rows:
+        print('-- (no rows)', file=output)
+        return
+    column_list = ', '.join(_quote_identifier(column.name) for column in columns)
+    for row in rows:
+        values = ', '.join(_sql_literal(value) for value in row)
+        print(f'INSERT INTO {qualified} ({column_list}) VALUES ({values});', file=output)
+
+
+def _dump_database(connection: Connection, output: TextIO, database: str) -> None:
+    quoted_db = _quote_identifier(database)
+    print(f'-- Database: {database}', file=output)
+    print(f'CREATE DATABASE IF NOT EXISTS {quoted_db};', file=output)
+    print(f'USE {quoted_db};', file=output)
+    print(file=output)
+    try:
+        table_results = connection.query(f'SHOW TABLES FROM {quoted_db};')
+    except MySQLError as exc:
+        print(f'-- cannot list tables in {database}: {exc}', file=output)
+        print(file=output)
+        return
+    tables: list[str] = []
+    for result in table_results:
+        for row in result.rows:
+            if row and row[0] is not None:
+                tables.append(row[0] if isinstance(row[0], str) else str(row[0]))
+    for table in tables:
+        _dump_table(connection, output, database, table)
+        print(file=output)
+
+
+def _dump_connection(connection: Connection, output: TextIO) -> None:
+    """Write a portable SQL dump of accessible user databases to output."""
+    print('-- mycli-lite database dump', file=output)
+    print(f'-- Generated: {time.strftime("%Y-%m-%d %H:%M:%S")}', file=output)
+    print(f'-- Server: {connection.server_version}', file=output)
+    print(file=output)
+    print('SET NAMES utf8mb4;', file=output)
+    print('SET FOREIGN_KEY_CHECKS=0;', file=output)
+    print(file=output)
+    try:
+        db_results = connection.query('SHOW DATABASES;')
+    except MySQLError as exc:
+        print(f'-- cannot list databases: {exc}', file=output)
+        return
+    databases: list[str] = []
+    for result in db_results:
+        for row in result.rows:
+            if row and row[0] is not None:
+                name = row[0] if isinstance(row[0], str) else str(row[0])
+                if name not in _SYSTEM_DATABASES:
+                    databases.append(name)
+    for database in databases:
+        _dump_database(connection, output, database)
+    print('SET FOREIGN_KEY_CHECKS=1;', file=output)
+
+
+def _dump_repl(connection: Connection, path: str | None) -> None:
+    """Write a portable SQL dump to stdout (path is None) or to the given file."""
+    if path is None:
+        try:
+            _dump_connection(connection, sys.stdout)
+        except KeyboardInterrupt:
+            connection.close()
+            print('Dump interrupted; the connection was closed.', file=sys.stderr)
+            raise _ReplExit(130) from None
+        except UnicodeEncodeError as exc:
+            print(f'ERROR: stdout cannot encode dump data: {exc}', file=sys.stderr)
+            print('Use \\dump PATH to write the dump with UTF-8 encoding.', file=sys.stderr)
+        return
+    try:
+        with open(path, 'w', encoding='utf-8', newline='') as handle:
+            _dump_connection(connection, handle)
+    except KeyboardInterrupt:
+        connection.close()
+        print('Dump interrupted; the connection was closed.', file=sys.stderr)
+        raise _ReplExit(130) from None
+    except OSError as exc:
+        print(f'ERROR: cannot write {path}: {exc}', file=sys.stderr)
+        return
+    print(f'Wrote dump to {path}', file=sys.stderr)
+
+
 def _print_repl_help(output: TextIO) -> None:
     print(
-        'Commands: \\q quit, \\c clear input, \\u DB change database, \\s status, \\G vertical output, \\? help.',
+        'Commands: \\q quit, \\c clear input, \\u DB change database, \\s status, '
+        '\\whoami user, \\serverinfo server, \\privs grants, \\dbs databases, '
+        '\\tables [DB], \\columns DB.TABLE|TABLE, \\loot SQL, \\dump [PATH] all databases, '
+        '\\G vertical output, \\? help.',
         file=output,
     )
+
+
+def _handle_repl_command(connection: Connection, arguments: argparse.Namespace, stripped: str) -> bool:
+    """Dispatch a single slash command from an empty input buffer.
+
+    Returns True when the line was a recognized command, False otherwise.
+    Raises ``_ReplExit`` when the REPL should leave its loop with a code.
+    """
+    lowered = stripped.lower()
+    if lowered in ('\\q', 'quit', 'exit'):
+        raise _ReplExit(0)
+    if stripped == '\\?':
+        _print_repl_help(sys.stderr)
+        return True
+    if stripped == '\\s':
+        server_version = _escape_text(connection.server_version)
+        transport = connection.tls_version or ('Unix socket' if connection.unix_socket else 'Plain TCP')
+        database = _escape_text(connection.database or '(none)')
+        print(
+            f'Server: {server_version}; connection id: {connection.connection_id}; database: {database}; transport: {transport}.',
+            file=sys.stderr,
+        )
+        return True
+    if stripped.startswith('\\u '):
+        database = stripped[3:].strip().removeprefix('`').removesuffix('`')
+        try:
+            connection.select_db(database)
+        except MySQLError as exc:
+            print(f'ERROR: {_escape_text(str(exc))}', file=sys.stderr)
+        else:
+            print(f'Database changed to {_escape_text(database)}.', file=sys.stderr)
+        return True
+    if stripped == '\\whoami':
+        _execute_repl_query(connection, 'SELECT CURRENT_USER();', arguments)
+        return True
+    if stripped == '\\serverinfo':
+        _execute_repl_query(connection, _SERVERINFO_SQL, arguments)
+        return True
+    if stripped == '\\privs':
+        _execute_repl_query(connection, 'SHOW GRANTS;', arguments)
+        return True
+    if stripped == '\\dbs':
+        _execute_repl_query(connection, 'SHOW DATABASES;', arguments)
+        return True
+    if stripped == '\\tables' or stripped.startswith('\\tables '):
+        target = stripped[len('\\tables') :].strip()
+        if target:
+            schema_name, table_name = _parse_qualified_name(target)
+            sql = f'SHOW TABLES FROM {_quote_identifier(schema_name or table_name)};'
+        else:
+            sql = 'SHOW TABLES;'
+        _execute_repl_query(connection, sql, arguments)
+        return True
+    if stripped == '\\columns' or stripped.startswith('\\columns '):
+        target = stripped[len('\\columns ') :].strip() if stripped != '\\columns' else ''
+        schema_name, table = _parse_qualified_name(target)
+        if not table:
+            print('ERROR: \\columns requires <database>.<table> or <table>.', file=sys.stderr)
+            return True
+        if schema_name:
+            sql = f'SHOW COLUMNS FROM {_quote_identifier(table)} FROM {_quote_identifier(schema_name)};'
+        else:
+            sql = f'SHOW COLUMNS FROM {_quote_identifier(table)};'
+        _execute_repl_query(connection, sql, arguments)
+        return True
+    if stripped == '\\loot' or stripped.startswith('\\loot '):
+        sql = stripped[len('\\loot ') :].strip() if stripped != '\\loot' else ''
+        if not sql:
+            print('ERROR: \\loot requires a SQL statement.', file=sys.stderr)
+            return True
+        _loot_query(connection, sql, arguments)
+        return True
+    if stripped == '\\dump' or stripped.startswith('\\dump '):
+        path = stripped[len('\\dump') :].strip() or None
+        _dump_repl(connection, path)
+        return True
+    return False
 
 
 def _run_repl(connection: Connection, arguments: argparse.Namespace) -> int:
@@ -1348,34 +1665,18 @@ def _run_repl(connection: Connection, arguments: argparse.Namespace) -> int:
             continue
 
         stripped = line.strip()
-        if not buffer and stripped.lower() in ('\\q', 'quit', 'exit'):
-            return 0
         if stripped == '\\c':
             buffer.clear()
             print('Input cleared.', file=sys.stderr)
             continue
-        if not buffer and stripped == '\\?':
-            _print_repl_help(sys.stderr)
-            continue
-        if not buffer and stripped == '\\s':
-            transport = connection.tls_version or ('Unix socket' if connection.unix_socket else 'Plain TCP')
-            database = _escape_text(connection.database or '(none)')
-            print(
-                f'Server: {server_version}; connection id: {connection.connection_id}; database: {database}; transport: {transport}.',
-                file=sys.stderr,
-            )
-            continue
-        if not buffer and stripped.startswith('\\u '):
-            database = stripped[3:].strip().removeprefix('`').removesuffix('`')
+        if not buffer:
             try:
-                connection.select_db(database)
-            except MySQLError as exc:
-                print(f'ERROR: {_escape_text(str(exc))}', file=sys.stderr)
-            else:
-                print(f'Database changed to {_escape_text(database)}.', file=sys.stderr)
-            continue
-        if not buffer and not stripped:
-            continue
+                if _handle_repl_command(connection, arguments, stripped):
+                    continue
+            except _ReplExit as signal:
+                return signal.code
+            if not stripped:
+                continue
 
         buffer.append(line)
         sql = '\n'.join(buffer)
@@ -1384,29 +1685,10 @@ def _run_repl(connection: Connection, arguments: argparse.Namespace) -> int:
             continue
         statement, vertical = terminated
         buffer.clear()
-        started = time.monotonic()
         try:
-            results = connection.query(statement)
-        except KeyboardInterrupt:
-            connection.close()
-            print('Query interrupted; the connection was closed.', file=sys.stderr)
-            return 130
-        except MySQLError as exc:
-            print(f'ERROR: {_escape_text(str(exc))}', file=sys.stderr)
-            if not connection.connected:
-                return 5
-            continue
-        output_format = 'vertical' if vertical else arguments.output_format
-        if output_format == 'auto':
-            output_format = 'table'
-        write_results(
-            results,
-            output_format=output_format,
-            show_headers=not arguments.skip_column_names,
-            show_status=True,
-            null_value=arguments.null,
-        )
-        print(f'{time.monotonic() - started:.3f} sec', file=sys.stderr)
+            _execute_repl_query(connection, statement, arguments, vertical=vertical)
+        except _ReplExit as signal:
+            return signal.code
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import ast
 import base64
 import hashlib
@@ -10,7 +11,7 @@ import socket
 import struct
 import subprocess
 import sys
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -741,3 +742,270 @@ def test_public_library_api_is_explicit() -> None:
         'main',
         'write_results',
     }
+
+
+class _ReplFakeConnection:
+    """Connection double that records queries and returns scripted results."""
+
+    def __init__(self, responses: dict[str, list[mycli_lite.Result]] | None = None) -> None:
+        self.queries: list[str] = []
+        self.responses = responses or {}
+        self.connected = True
+        self.database = 'craft'
+        self.server_version = '8.0.15'
+        self.connection_id = 42
+        self.host = 'db'
+        self.port = 3306
+        self.unix_socket = None
+        self.tls_version = None
+
+    def query(self, sql: str) -> list[mycli_lite.Result]:
+        self.queries.append(sql)
+        for prefix, results in self.responses.items():
+            if sql == prefix or sql.startswith(prefix):
+                return results
+        return []
+
+    def select_db(self, database: str) -> None:
+        self.queries.append(f'USE {database}')
+        self.database = database
+
+    def close(self) -> None:
+        self.connected = False
+
+
+def _repl_arguments() -> argparse.Namespace:
+    return argparse.Namespace(
+        output_format='tsv',
+        skip_column_names=False,
+        null='NULL',
+    )
+
+
+def _conn(fake: _ReplFakeConnection) -> mycli_lite.Connection:
+    """Dress the test double as a Connection for the REPL helper signatures."""
+    return cast('mycli_lite.Connection', fake)
+
+
+def _tsv_value_rows() -> list[mycli_lite.Result]:
+    column = mycli_lite.Column('v', '', '', '', '', 45, 0xFD, 0)
+    return [mycli_lite.Result(columns=(column,), rows=[('ok',)])]
+
+
+@pytest.mark.parametrize(
+    ('command', 'sql'),
+    [
+        ('\\whoami', 'SELECT CURRENT_USER();'),
+        ('\\privs', 'SHOW GRANTS;'),
+        ('\\dbs', 'SHOW DATABASES;'),
+        ('\\tables', 'SHOW TABLES;'),
+        ('\\tables application', 'SHOW TABLES FROM `application`;'),
+        ('\\tables `app`', 'SHOW TABLES FROM `app`;'),
+        ('\\columns users', 'SHOW COLUMNS FROM `users`;'),
+        ('\\columns application.users', 'SHOW COLUMNS FROM `users` FROM `application`;'),
+    ],
+)
+def test_repl_command_emits_expected_sql(command: str, sql: str, capsys: pytest.CaptureFixture[str]) -> None:
+    connection = _ReplFakeConnection({'SELECT': _tsv_value_rows(), 'SHOW': _tsv_value_rows()})
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), command) is True
+    assert connection.queries == [sql]
+    capsys.readouterr()
+
+
+def test_repl_whoami_and_serverinfo_use_distinct_sql(capsys: pytest.CaptureFixture[str]) -> None:
+    connection = _ReplFakeConnection({'SELECT': _tsv_value_rows()})
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\whoami') is True
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\serverinfo') is True
+    assert connection.queries[0] == 'SELECT CURRENT_USER();'
+    assert connection.queries[1] == mycli_lite._SERVERINFO_SQL
+    capsys.readouterr()
+
+
+def test_repl_tables_quotes_backticks_in_identifier(capsys: pytest.CaptureFixture[str]) -> None:
+    connection = _ReplFakeConnection({'SHOW': _tsv_value_rows()})
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\tables ap`p') is True
+    # Only the outer backticks are added; an embedded backtick would be doubled by _quote_identifier.
+    assert connection.queries == ['SHOW TABLES FROM `ap``p`;']
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize('command', ['\\columns', '\\columns   ', '\\loot', '\\loot   '])
+def test_repl_arg_commands_require_an_argument(command: str, capsys: pytest.CaptureFixture[str]) -> None:
+    connection = _ReplFakeConnection()
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), command) is True
+    assert connection.queries == []
+    captured = capsys.readouterr()
+    assert captured.err.startswith('ERROR: ')
+
+
+@pytest.mark.parametrize('command', ['\\q', 'quit', 'exit', '\\Q', 'EXIT'])
+def test_repl_quit_commands_raise_repl_exit_zero(command: str) -> None:
+    with pytest.raises(mycli_lite._ReplExit) as info:
+        mycli_lite._handle_repl_command(_conn(_ReplFakeConnection()), _repl_arguments(), command)
+    assert info.value.code == 0
+
+
+def test_repl_unknown_line_falls_through_to_sql_buffer() -> None:
+    assert mycli_lite._handle_repl_command(_conn(_ReplFakeConnection()), _repl_arguments(), 'SELECT 1') is False
+
+
+def test_repl_help_lists_new_commands() -> None:
+    buffer = io.StringIO()
+    mycli_lite._print_repl_help(buffer)
+    text = buffer.getvalue()
+    for needle in ('\\whoami', '\\serverinfo', '\\privs', '\\dbs', '\\tables', '\\columns', '\\loot', '\\dump'):
+        assert needle in text
+
+
+def test_repl_loot_writes_tsv_to_loot_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.chdir(tmp_path)
+    column = mycli_lite.Column('id', '', '', '', '', 3, 0x03, 0)
+    # The text protocol always returns cells as str/bytes/None, never raw ints.
+    results = [mycli_lite.Result(columns=(column,), rows=[('1',), ('2',)])]
+    connection = _ReplFakeConnection({'SELECT': results})
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\loot SELECT id FROM application.users;') is True
+    assert connection.queries == ['SELECT id FROM application.users;']
+    loot_file = tmp_path / 'loot' / 'loot_001.tsv'
+    assert loot_file.read_text(encoding='utf-8') == 'id\n1\n2\n'
+    captured = capsys.readouterr()
+    assert 'Wrote 2 row(s) to loot/loot_001.tsv' in captured.err
+
+
+def test_repl_loot_increments_filename_across_invocations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    connection = _ReplFakeConnection({'SELECT': _tsv_value_rows()})
+    for _ in range(3):
+        mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\loot SELECT 1;')
+    assert sorted((tmp_path / 'loot').iterdir()) == [
+        tmp_path / 'loot' / 'loot_001.tsv',
+        tmp_path / 'loot' / 'loot_002.tsv',
+        tmp_path / 'loot' / 'loot_003.tsv',
+    ]
+
+
+def _dump_responses() -> dict[str, list[mycli_lite.Result]]:
+    def text_column(name: str) -> mycli_lite.Column:
+        return mycli_lite.Column(name, '', '', '', '', 45, 0xFD, 0)
+
+    int_column = mycli_lite.Column('id', '', '', '', '', 3, 0x03, 0)
+    blob_column = mycli_lite.Column('secret', '', '', '', '', 253, 0xFC, 0)
+    return {
+        'SHOW DATABASES;': [
+            mycli_lite.Result(
+                columns=(text_column('Database'),),
+                rows=[
+                    ('application',),
+                    ('mysql',),
+                    ('information_schema',),
+                    ('sys',),
+                ],
+            )
+        ],
+        'SHOW TABLES FROM': [
+            mycli_lite.Result(
+                columns=(text_column('Tables_in_application'),),
+                rows=[
+                    ('users',),
+                ],
+            )
+        ],
+        'SHOW CREATE TABLE': [
+            mycli_lite.Result(
+                columns=(text_column('Table'), text_column('Create Table')),
+                rows=[('users', 'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB')],
+            )
+        ],
+        'SELECT * FROM': [
+            mycli_lite.Result(
+                columns=(int_column, text_column('username'), blob_column),
+                rows=[('1', 'al"ice', b'\x00\xff'), ('2', "bo'b", None)],
+            )
+        ],
+    }
+
+
+def test_repl_dump_to_stdout_produces_portable_sql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    connection = _ReplFakeConnection(_dump_responses())
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump') is True
+    captured = capsys.readouterr()
+    dump = captured.out
+    assert 'CREATE DATABASE IF NOT EXISTS `application`;' in dump
+    assert 'USE `application`;' in dump
+    assert 'CREATE DATABASE IF NOT EXISTS `mysql`;' not in dump
+    assert 'information_schema' not in dump
+    assert 'DROP TABLE IF EXISTS `application`.`users`;' in dump
+    assert 'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB;' in dump
+    assert "INSERT INTO `application`.`users` (`id`, `username`, `secret`) VALUES ('1', 'al\"ice', X'00ff');" in dump
+    assert "INSERT INTO `application`.`users` (`id`, `username`, `secret`) VALUES ('2', 'bo\\'b', NULL);" in dump
+    assert dump.endswith('SET FOREIGN_KEY_CHECKS=1;\n')
+    assert 'Wrote dump to' not in captured.err
+    assert not (tmp_path / 'loot').exists()
+
+
+def test_repl_dump_to_file_writes_named_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.chdir(tmp_path)
+    connection = _ReplFakeConnection(_dump_responses())
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump dump.sql') is True
+    dump_file = tmp_path / 'dump.sql'
+    assert dump_file.exists()
+    dump = dump_file.read_text(encoding='utf-8')
+    assert 'CREATE DATABASE IF NOT EXISTS `application`;' in dump
+    assert "INSERT INTO `application`.`users`" in dump
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert 'Wrote dump to dump.sql' in captured.err
+
+
+def test_repl_dump_to_missing_directory_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    connection = _ReplFakeConnection(_dump_responses())
+    assert mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump missing/dump.sql') is True
+    assert not (tmp_path / 'missing').exists()
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert 'ERROR: cannot write missing/dump.sql' in captured.err
+
+
+def test_repl_dump_records_unreadable_table_as_comment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    connection = _ReplFakeConnection(_dump_responses())
+
+    def query(sql: str) -> list[mycli_lite.Result]:
+        if sql.startswith('SELECT * FROM'):
+            raise mycli_lite.ServerError(1142, 'SELECT command denied', '42000')
+        return _ReplFakeConnection.query(connection, sql)
+
+    connection.query = query  # type: ignore[method-assign]
+    mycli_lite._handle_repl_command(_conn(connection), _repl_arguments(), '\\dump blocked.sql')
+    dump = (tmp_path / 'blocked.sql').read_text(encoding='utf-8')
+    assert '-- cannot SELECT from application.users:' in dump
+    assert 'INSERT INTO' not in dump
+    assert 'SET FOREIGN_KEY_CHECKS=1;' in dump
+
+
+def test_repl_execute_query_swallows_server_error_but_keeps_connection(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = _ReplFakeConnection()
+
+    def query(sql: str) -> list[mycli_lite.Result]:
+        raise mycli_lite.ServerError(1064, 'syntax error', '42000')
+
+    connection.query = query  # type: ignore[method-assign]
+    result = mycli_lite._execute_repl_query(_conn(connection), 'SELECT 1;', _repl_arguments())
+    assert result is None
+    assert connection.connected is True
+    captured = capsys.readouterr()
+    assert 'ERROR: 1064 [42000]' in captured.err
+
+
+def test_sql_literal_escapes_special_values() -> None:
+    assert mycli_lite._sql_literal(None) == 'NULL'
+    assert mycli_lite._sql_literal(b'\x00\xff') == "X'00ff'"
+    assert mycli_lite._sql_literal("a'b\nc\\d") == "'a\\'b\\nc\\\\d'"
+    assert mycli_lite._sql_literal('plain') == "'plain'"

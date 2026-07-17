@@ -154,7 +154,22 @@ Output options:
 
 Text control characters and backslashes are escaped, binary values are written as lowercase hexadecimal prefixed with `0x`, and CSV/TSV quoting is handled by the standard-library `csv` module. Rows go to stdout; diagnostics and interactive status go to stderr. Batch status is printed only when stdout is a TTY.
 
-The REPL waits for a semicolon outside quotes/comments, `\g`, or `\G`. `\G` selects vertical output for that query. Its built-in commands are `\q`/`quit`/`exit`, `\c`, `\u DATABASE`, `\s`, and `\?`. Ctrl-C clears an input buffer; Ctrl-C during a query closes the connection and exits 130. Ctrl-D exits normally.
+The REPL waits for a semicolon outside quotes/comments, `\g`, or `\G`. `\G` selects vertical output for that query. Its built-in commands are `\q`/`quit`/`exit`, `\c`, `\u DATABASE`, `\s`, and `\?`, plus the reconnaissance helpers described below. Ctrl-C clears an input buffer; Ctrl-C during a query closes the connection and exits 130. Ctrl-D exits normally.
+
+### Interactive reconnaissance commands
+
+The REPL also offers slash commands that wrap common MySQL catalog queries. Each runs one statement and renders results through the active output format, just like typing the SQL by hand. Errors are printed to stderr without leaving the REPL.
+
+- `\whoami` runs `SELECT CURRENT_USER();`.
+- `\serverinfo` runs a single `SELECT` of `VERSION()`, `@@hostname`, `@@version_comment`, `@@version_compile_os`, `@@version_compile_machine`, `@@datadir`, `@@port`, `@@socket`, and `@@secure_file_priv`.
+- `\privs` runs `SHOW GRANTS;`.
+- `\dbs` runs `SHOW DATABASES;`.
+- `\tables [DATABASE]` runs `SHOW TABLES;` for the current database, or `SHOW TABLES FROM \`DATABASE\`;` when a name is given. Backticks are added automatically.
+- `\columns DATABASE.TABLE` or `\columns TABLE` runs `SHOW COLUMNS FROM \`TABLE\` FROM \`DATABASE\`;` (or without the `FROM \`DATABASE\`` clause when only a table is given). The dot-separated form is the only argument shape supported; identifiers containing literal dots must be entered as raw SQL.
+- `\loot SQL` runs the given SQL and writes the rows to a fresh TSV file under `./loot/` named `loot_001.tsv`, `loot_002.tsv`, and so on. The chosen path is printed to stderr. Only one statement is sent, so terminate the SQL with a single `;`.
+- `\dump [PATH]` writes a portable SQL dump of every accessible user database. With no argument it writes the SQL to stdout (so it can be piped or redirected, e.g. `\dump | gzip > dump.sql.gz`); with a `PATH` it writes to that file with UTF-8 encoding and prints the path to stderr. System databases (`information_schema`, `performance_schema`, `mysql`, `sys`, `ndbinfo`) are skipped. For each remaining database it emits `CREATE DATABASE IF NOT EXISTS`, `USE`, then for each table a `DROP TABLE IF EXISTS`, the `SHOW CREATE TABLE` output, and `INSERT INTO ... VALUES` rows with NULL/string/binary literal escaping. Per-database or per-table errors are written as comments and the dump continues with the next object. Ctrl-C during a dump closes the connection and exits 130, like interrupting a query. If stdout cannot encode the dump data (for example under an ASCII locale), `\dump` reports the error and suggests re-running with an explicit `PATH`, which always uses UTF-8.
+
+These commands are conveniences only. They use the same single-statement protocol path as raw REPL input and add no schema caching, schema hiding, or privilege escalation.
 
 CLI exit codes are:
 

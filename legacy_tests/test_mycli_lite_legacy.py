@@ -9,9 +9,11 @@ import binascii
 import hashlib
 import io
 import os
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import mycli_lite_legacy as legacy
@@ -637,6 +639,323 @@ raise SystemExit(client.main(['--execute', 'SELECT 1', '--ssl-mode', 'disabled']
             ),
         )
         self.assertEqual(stderr, b'')
+
+
+class ReplSlashCommandTests(unittest.TestCase):
+    """Verify the interactive REPL reconnaissance slash commands."""
+
+    def setUp(self):
+        self._original_cwd = os.getcwd()
+        self._original_stderr = sys.stderr
+        self._original_stdout = sys.stdout
+        self._stderr = io.StringIO()
+        self._stdout = io.StringIO()
+        sys.stderr = self._stderr
+        sys.stdout = self._stdout
+
+    def tearDown(self):
+        sys.stderr = self._original_stderr
+        sys.stdout = self._original_stdout
+        os.chdir(self._original_cwd)
+
+    def _arguments(self):
+        arguments = types_simple_namespace()
+        arguments.output_format = u'tsv'
+        arguments.skip_column_names = False
+        arguments.null = u'NULL'
+        return arguments
+
+    def _value_connection(self, responses=None):
+        return _ReplFakeConnection(responses)
+
+    def _assert_emitted(self, connection, command, sql):
+        self.assertIs(legacy._handle_repl_command(connection, self._arguments(), command), True)
+        self.assertEqual(connection.queries, [sql])
+
+    def test_simple_commands_emit_expected_sql(self):
+        connection = self._value_connection({u'SELECT': _tsv_rows(), u'SHOW': _tsv_rows()})
+        cases = [
+            (u'\\whoami', u'SELECT CURRENT_USER();'),
+            (u'\\privs', u'SHOW GRANTS;'),
+            (u'\\dbs', u'SHOW DATABASES;'),
+            (u'\\tables', u'SHOW TABLES;'),
+            (u'\\tables application', u'SHOW TABLES FROM `application`;'),
+            (u'\\tables `app`', u'SHOW TABLES FROM `app`;'),
+            (u'\\columns users', u'SHOW COLUMNS FROM `users`;'),
+            (u'\\columns application.users', u'SHOW COLUMNS FROM `users` FROM `application`;'),
+        ]
+        for command, sql in cases:
+            connection = self._value_connection({u'SELECT': _tsv_rows(), u'SHOW': _tsv_rows()})
+            self._assert_emitted(connection, command, sql)
+
+    def test_serverinfo_uses_canonical_select(self):
+        connection = self._value_connection({u'SELECT': _tsv_rows()})
+        self.assertIs(
+            legacy._handle_repl_command(connection, self._arguments(), u'\\serverinfo'), True
+        )
+        self.assertEqual(connection.queries, [legacy._SERVERINFO_SQL])
+
+    def test_tables_doubles_embedded_backtick(self):
+        connection = self._value_connection({u'SHOW': _tsv_rows()})
+        self._assert_emitted(connection, u'\\tables ap`p', u'SHOW TABLES FROM `ap``p`;')
+
+    def test_columns_without_argument_errors_and_does_not_query(self):
+        connection = self._value_connection()
+        self.assertIs(
+            legacy._handle_repl_command(connection, self._arguments(), u'\\columns'), True
+        )
+        self.assertEqual(connection.queries, [])
+        self.assertTrue(self._stderr.getvalue().startswith(u'ERROR: '))
+
+    def test_loot_without_argument_errors_and_does_not_query(self):
+        connection = self._value_connection()
+        self.assertIs(
+            legacy._handle_repl_command(connection, self._arguments(), u'\\loot'), True
+        )
+        self.assertEqual(connection.queries, [])
+        self.assertTrue(self._stderr.getvalue().startswith(u'ERROR: '))
+
+    def test_quit_commands_raise_repl_exit_zero(self):
+        for command in (u'\\q', u'quit', u'exit', u'\\Q', u'EXIT'):
+            connection = self._value_connection()
+            try:
+                legacy._handle_repl_command(connection, self._arguments(), command)
+            except legacy._ReplExit as signal:
+                self.assertEqual(signal.code, 0)
+            else:
+                self.fail(u'{0!r} did not raise _ReplExit'.format(command))
+
+    def test_unknown_line_is_not_a_command(self):
+        self.assertIs(
+            legacy._handle_repl_command(
+                self._value_connection(), self._arguments(), u'SELECT 1'
+            ),
+            False,
+        )
+
+    def test_help_lists_every_new_command(self):
+        buffer = io.StringIO()
+        legacy._print_repl_help(buffer)
+        text = buffer.getvalue()
+        for needle in (
+            u'\\whoami', u'\\serverinfo', u'\\privs', u'\\dbs',
+            u'\\tables', u'\\columns', u'\\loot', u'\\dump',
+        ):
+            self.assertIn(needle, text)
+
+    def test_loot_writes_tsv_file_and_reports_path(self):
+        tmpdir = tempfile.mkdtemp()
+        os.chdir(tmpdir)
+        try:
+            column = legacy.Column(u'id', u'', u'', u'', u'', 3, 0x03, 0)
+            results = [legacy.Result(columns=(column,), rows=[(u'1',), (u'2',)])]
+            connection = _ReplFakeConnection({u'SELECT': results})
+            self.assertIs(
+                legacy._handle_repl_command(
+                    connection,
+                    self._arguments(),
+                    u'\\loot SELECT id FROM application.users;',
+                ),
+                True,
+            )
+            self.assertEqual(connection.queries, [u'SELECT id FROM application.users;'])
+            loot_path = os.path.join(tmpdir, u'loot', u'loot_001.tsv')
+            with io.open(loot_path, encoding=u'utf-8') as handle:
+                self.assertEqual(handle.read(), u'id\n1\n2\n')
+            self.assertIn(u'Wrote 2 row(s) to loot/loot_001.tsv', self._stderr.getvalue())
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_loot_increments_filename_across_invocations(self):
+        tmpdir = tempfile.mkdtemp()
+        os.chdir(tmpdir)
+        try:
+            connection = _ReplFakeConnection({u'SELECT': _tsv_rows()})
+            for _ in range(3):
+                legacy._handle_repl_command(connection, self._arguments(), u'\\loot SELECT 1;')
+            names = sorted(os.listdir(os.path.join(tmpdir, u'loot')))
+            self.assertEqual(names, [u'loot_001.tsv', u'loot_002.tsv', u'loot_003.tsv'])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dump_to_stdout_produces_portable_sql_and_skips_system_databases(self):
+        tmpdir = tempfile.mkdtemp()
+        os.chdir(tmpdir)
+        try:
+            connection = _ReplFakeConnection(_dump_responses())
+            self.assertIs(
+                legacy._handle_repl_command(connection, self._arguments(), u'\\dump'), True
+            )
+            dump = self._stdout.getvalue()
+            self.assertIn(u'CREATE DATABASE IF NOT EXISTS `application`;', dump)
+            self.assertIn(u'USE `application`;', dump)
+            self.assertNotIn(u'CREATE DATABASE IF NOT EXISTS `mysql`;', dump)
+            self.assertNotIn(u'information_schema', dump)
+            self.assertIn(u'DROP TABLE IF EXISTS `application`.`users`;', dump)
+            self.assertIn(
+                u'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB;',
+                dump,
+            )
+            self.assertIn(
+                u"INSERT INTO `application`.`users` (`id`, `username`, `secret`) "
+                u"VALUES ('1', 'al\"ice', X'00ff');",
+                dump,
+            )
+            self.assertIn(
+                u"INSERT INTO `application`.`users` (`id`, `username`, `secret`) "
+                u"VALUES ('2', 'bo\\'b', NULL);",
+                dump,
+            )
+            self.assertTrue(dump.endswith(u'SET FOREIGN_KEY_CHECKS=1;\n'))
+            self.assertNotIn(u'Wrote dump to', self._stderr.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, u'loot')))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dump_to_file_writes_named_path(self):
+        tmpdir = tempfile.mkdtemp()
+        os.chdir(tmpdir)
+        try:
+            connection = _ReplFakeConnection(_dump_responses())
+            self.assertIs(
+                legacy._handle_repl_command(connection, self._arguments(), u'\\dump dump.sql'),
+                True,
+            )
+            dump_path = os.path.join(tmpdir, u'dump.sql')
+            with io.open(dump_path, encoding=u'utf-8') as handle:
+                dump = handle.read()
+            self.assertIn(u'CREATE DATABASE IF NOT EXISTS `application`;', dump)
+            self.assertIn(u'INSERT INTO `application`.`users`', dump)
+            self.assertEqual(self._stdout.getvalue(), u'')
+            self.assertIn(u'Wrote dump to dump.sql', self._stderr.getvalue())
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dump_to_missing_directory_reports_error(self):
+        tmpdir = tempfile.mkdtemp()
+        os.chdir(tmpdir)
+        try:
+            connection = _ReplFakeConnection(_dump_responses())
+            self.assertIs(
+                legacy._handle_repl_command(
+                    connection, self._arguments(), u'\\dump missing/dump.sql'
+                ),
+                True,
+            )
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, u'missing')))
+            self.assertEqual(self._stdout.getvalue(), u'')
+            self.assertIn(u'ERROR: cannot write missing/dump.sql', self._stderr.getvalue())
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dump_records_unreadable_table_as_comment(self):
+        tmpdir = tempfile.mkdtemp()
+        os.chdir(tmpdir)
+        try:
+            connection = _ReplFakeConnection(_dump_responses())
+
+            def query(sql):
+                if sql.startswith(u'SELECT * FROM'):
+                    raise legacy.ServerError(1142, u'SELECT command denied', u'42000')
+                return _ReplFakeConnection.query(connection, sql)
+
+            connection.query = query
+            legacy._handle_repl_command(connection, self._arguments(), u'\\dump blocked.sql')
+            dump_path = os.path.join(tmpdir, u'blocked.sql')
+            with io.open(dump_path, encoding=u'utf-8') as handle:
+                dump = handle.read()
+            self.assertIn(u'-- cannot SELECT from application.users:', dump)
+            self.assertNotIn(u'INSERT INTO', dump)
+            self.assertIn(u'SET FOREIGN_KEY_CHECKS=1;', dump)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_execute_repl_query_swallows_server_error_but_keeps_connection(self):
+        connection = self._value_connection()
+
+        def query(_sql):
+            raise legacy.ServerError(1064, u'syntax error', u'42000')
+
+        connection.query = query
+        result = legacy._execute_repl_query(connection, u'SELECT 1;', self._arguments())
+        self.assertIsNone(result)
+        self.assertTrue(connection.connected)
+        self.assertIn(u'ERROR: 1064 [42000]', self._stderr.getvalue())
+
+    def test_sql_literal_escapes_special_values(self):
+        self.assertEqual(legacy._sql_literal(None), u'NULL')
+        self.assertEqual(legacy._sql_literal(b'\x00\xff'), u"X'00ff'")
+        self.assertEqual(legacy._sql_literal(u"a'b\nc\\d"), u"'a\\'b\\nc\\\\d'")
+        self.assertEqual(legacy._sql_literal(u'plain'), u"'plain'")
+
+
+class _ReplFakeConnection(object):
+    """Connection double that records queries and returns scripted results."""
+
+    def __init__(self, responses=None):
+        self.queries = []
+        self.responses = responses or {}
+        self.connected = True
+        self.database = u'craft'
+        self.server_version = u'8.0.15'
+        self.connection_id = 42
+        self.host = u'db'
+        self.port = 3306
+        self.unix_socket = None
+        self.tls_version = None
+
+    def query(self, sql):
+        self.queries.append(sql)
+        for prefix, results in self.responses.items():
+            if sql == prefix or sql.startswith(prefix):
+                return results
+        return []
+
+    def select_db(self, database):
+        self.queries.append(u'USE ' + database)
+        self.database = database
+
+    def close(self):
+        self.connected = False
+
+
+def _tsv_rows():
+    column = legacy.Column(u'v', u'', u'', u'', u'', 45, 0xFD, 0)
+    return [legacy.Result(columns=(column,), rows=[(u'ok',)])]
+
+
+def _dump_responses():
+    def text_column(name):
+        return legacy.Column(name, u'', u'', u'', u'', 45, 0xFD, 0)
+
+    int_column = legacy.Column(u'id', u'', u'', u'', u'', 3, 0x03, 0)
+    blob_column = legacy.Column(u'secret', u'', u'', u'', u'', 253, 0xFC, 0)
+    return {
+        u'SHOW DATABASES;': [legacy.Result(columns=(text_column(u'Database'),), rows=[
+            (u'application',), (u'mysql',), (u'information_schema',), (u'sys',),
+        ])],
+        u'SHOW TABLES FROM': [legacy.Result(columns=(text_column(u'Tables_in_application'),), rows=[
+            (u'users',),
+        ])],
+        u'SHOW CREATE TABLE': [legacy.Result(
+            columns=(text_column(u'Table'), text_column(u'Create Table')),
+            rows=[(u'users', u'CREATE TABLE `users` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB')],
+        )],
+        u'SELECT * FROM': [legacy.Result(
+            columns=(int_column, text_column(u'username'), blob_column),
+            rows=[(u'1', u'al"ice', b'\x00\xff'), (u'2', u"bo'b", None)],
+        )],
+    }
+
+
+def types_simple_namespace():
+    try:
+        import argparse as _argparse
+        return _argparse.Namespace()
+    except ImportError:
+        class _Namespace(object):
+            pass
+        return _Namespace()
 
 
 if __name__ == '__main__':
