@@ -20,16 +20,6 @@ support. CPython 2.7.18 is the Python 2 CI reference.
 
 ## Use
 
-Copy the appropriate file to the target and run it directly:
-
-```bash
-scp mycli_lite.py operator@target:/tmp/
-python3 -I -S /tmp/mycli_lite.py --version
-
-# Python 2.7 or Python 3.4-3.9
-python -B -E -s -S /tmp/mycli_lite_legacy.py --version
-```
-
 Connect interactively or execute a query without placing the password in the
 process arguments:
 
