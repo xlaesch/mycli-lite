@@ -71,24 +71,12 @@ jobs:
           entry_points=$(grep '/entry_points.txt$' /tmp/wheel-files)
           unzip -p "${wheel}" "${entry_points}" | grep -Fxq 'mycli-lite = mycli_lite:_main_entrypoint'
 
-      - name: Extract release notes
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v version="${version}" '
-            index($0, "## " version " ") == 1 { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-            END { if (!found) exit 1 }
-          ' CHANGELOG.md > RELEASE_NOTES.md
-          test -s RELEASE_NOTES.md
-
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-artifacts
           path: |
             mycli_lite.py
             mycli_lite_legacy.py
-            RELEASE_NOTES.md
           if-no-files-found: error
 
   release-assets:
@@ -118,5 +106,5 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
               --verify-tag \
               --title "mycli-lite ${GITHUB_REF_NAME}" \
-              --notes-file release-artifacts/RELEASE_NOTES.md
+              --generate-notes
           fi

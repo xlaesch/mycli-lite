@@ -10,7 +10,7 @@
 - [ ] Both raw artifacts remain independently executable with no runtime dependency.
 - [ ] Public behavior and `__version__` remain aligned across both artifacts.
 - [ ] Protocol or security behavior has regression coverage.
-- [ ] User-visible behavior is documented in `CHANGELOG.md`.
+- [ ] User-visible behavior is summarized for the GitHub release notes.
 - [ ] Copied or derived code includes its provenance and compatible license.
 
 ## Scope impact
