@@ -4,6 +4,7 @@ import ast
 import base64
 import hashlib
 import io
+import os
 from pathlib import Path
 import socket
 import struct
@@ -32,6 +33,24 @@ CAPABILITIES = (
     | mycli_lite.CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS
     | mycli_lite.CLIENT_CONNECT_WITH_DB
 )
+
+
+def run_with_closed_stdout(command: list[str]) -> tuple[int, bytes]:
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        os.close(write_fd)
+    assert process.stderr is not None
+    stderr = process.stderr.read()
+    process.stderr.close()
+    return process.wait(), stderr
 
 
 def frame(payload: bytes, sequence_id: int) -> bytes:
@@ -593,6 +612,45 @@ def test_output_distinguishes_null_empty_binary_and_controls() -> None:
     assert output.getvalue() == 'a\tb\tc\n\\N\tx\\n\\x1b\t0x00ff\n'
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='requires POSIX C-locale encoding')
+@pytest.mark.parametrize(
+    ('output_format', 'expected'),
+    [
+        ('table', b'+--------+\n| v      |\n+--------+\n| \\u2603 |\n+--------+\n'),
+        ('vertical', b'*************************** 1. row ***************************\nv: \\u2603\n'),
+        ('tsv', b'v\n\\u2603\n'),
+        ('csv', b'v\n\\u2603\n'),
+    ],
+)
+def test_output_is_safe_and_aligned_in_ascii_locale(output_format: str, expected: bytes) -> None:
+    script = """
+import sys
+import mycli_lite as client
+
+column = client.Column('v', '', '', '', '', 45, 0xfd, 0)
+result = client.Result(columns=(column,), rows=[(chr(0x2603),)])
+client.write_results([result], output_format=sys.argv[1])
+"""
+    environment = os.environ.copy()
+    environment.pop('PYTHONIOENCODING', None)
+    environment.update({
+        'LANG': 'C',
+        'LC_ALL': 'C',
+        'PYTHONCOERCECLOCALE': '0',
+        'PYTHONUTF8': '0',
+    })
+    process = subprocess.run(
+        [sys.executable, '-B', '-s', '-S', '-c', script, output_format],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+    assert process.returncode == 0
+    assert process.stdout == expected
+    assert process.stderr == b''
+
+
 @pytest.mark.parametrize(
     ('sql', 'complete'),
     [
@@ -616,8 +674,43 @@ def test_artifact_runs_without_site_packages() -> None:
         text=True,
     )
     assert result.returncode == 0
-    assert result.stdout == 'mycli-lite 0.1.0\n'
+    assert result.stdout == f'mycli-lite {mycli_lite.__version__}\n'
     assert result.stderr == ''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='requires POSIX closed-pipe semantics')
+def test_cli_returns_141_for_small_closed_pipe() -> None:
+    script = """
+import mycli_lite as client
+
+class FakeConnection:
+    def __init__(self, **_kwargs):
+        pass
+
+    def connect(self):
+        pass
+
+    def close(self):
+        pass
+
+    def query(self, _sql):
+        column = client.Column('value', '', '', '', '', 45, 0xfd, 0)
+        return [client.Result(columns=(column,), rows=[('x',)])]
+
+client.Connection = FakeConnection
+raise SystemExit(client.main(['--execute', 'SELECT 1', '--ssl-mode', 'disabled']))
+"""
+    returncode, stderr = run_with_closed_stdout([sys.executable, '-B', '-E', '-s', '-S', '-c', script])
+    assert returncode == 141
+    assert stderr == b''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='requires POSIX closed-pipe semantics')
+@pytest.mark.parametrize('option', ['--version', '--help'])
+def test_parser_output_returns_141_for_closed_pipe(option: str) -> None:
+    returncode, stderr = run_with_closed_stdout([sys.executable, '-I', '-S', str(ROOT / 'mycli_lite.py'), option])
+    assert returncode == 141
+    assert stderr == b''
 
 
 def test_runtime_imports_are_standard_library_only() -> None:

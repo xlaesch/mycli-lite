@@ -57,16 +57,29 @@ jobs:
       - run: uv run --frozen -- mypy mycli_lite.py tests
       - run: uv build
 
-      - name: Verify wheel contents and dependencies
+      - name: Verify distribution contents and dependencies
         run: |
           wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
           unzip -Z1 "$wheel"
-          if unzip -p "$wheel" '*/METADATA' | grep -q '^Requires-Dist:'; then
+          if unzip -p "$wheel" '*/METADATA' | grep '^Requires-Dist:' >/dev/null; then
             echo 'Wheel unexpectedly declares a runtime dependency.' >&2
+            exit 1
+          fi
+          if ! unzip -p "$wheel" '*/entry_points.txt' | grep -Fx 'mycli-lite = mycli_lite:_main_entrypoint' >/dev/null; then
+            echo 'Wheel console entry point bypasses CLI output handling.' >&2
             exit 1
           fi
           if unzip -Z1 "$wheel" | grep -Ev '^(mycli_lite\.py|mycli_lite-[^/]+\.dist-info/([^/]+|licenses/(LICENSE\.txt|ATTRIBUTION\.md)))$'; then
             echo 'Wheel contains an unexpected file.' >&2
+            exit 1
+          fi
+          if unzip -Z1 "$wheel" | grep '^mycli_lite_legacy\.py$' >/dev/null; then
+            echo 'Wheel unexpectedly contains the legacy artifact.' >&2
+            exit 1
+          fi
+          if ! tar -tzf "$sdist" | grep -E '^[^/]+/mycli_lite_legacy\.py$' >/dev/null; then
+            echo 'Source distribution does not contain the legacy artifact.' >&2
             exit 1
           fi
 
@@ -75,13 +88,71 @@ jobs:
           uv venv .wheel-venv --python 3.14
           uv pip install --python .wheel-venv/bin/python --no-deps dist/*.whl
           .wheel-venv/bin/mycli-lite --version
+          .wheel-venv/bin/python - <<'PY'
+          import os
+          import subprocess
+
+          read_fd, write_fd = os.pipe()
+          os.close(read_fd)
+          try:
+              process = subprocess.Popen(
+                  ['.wheel-venv/bin/mycli-lite', '--version'],
+                  stdout=write_fd,
+                  stderr=subprocess.PIPE,
+              )
+          finally:
+              os.close(write_fd)
+          _stdout, stderr = process.communicate()
+          if process.returncode != 141 or stderr:
+              raise SystemExit(
+                  'installed console closed-pipe check failed: returncode={0}, stderr={1!r}'.format(
+                      process.returncode,
+                      stderr,
+                  )
+              )
+          PY
+
+  legacy-unit-tests:
+    name: Legacy Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '2.7.18'
+            image: 'python:2.7.18-slim-buster@sha256:6c1ffdff499e29ea663e6e67c9b6b9a3b401d554d2c9f061f9a45344e3992363'
+          - python-version: '3.4.10'
+            image: 'python:3.4.10-slim-stretch@sha256:44b78f9c6c93df7d8bc0d32a85ef8fd10a074a101985bde6fd41d3b5aadf16f0'
+          - python-version: '3.5.10'
+            image: 'python:3.5.10-slim-buster@sha256:2348c9c9fa90808066919c036d59919fbf82c7f9277c2ff8b6b8cc6e72f5b9d7'
+          - python-version: '3.6.15'
+            image: 'python:3.6.15-slim-buster@sha256:e10aa83604948c6d8d9f72a9a20193d84bb2dbe550b725eb5208387117fde065'
+          - python-version: '3.7.17'
+            image: 'python:3.7.17-slim-bullseye@sha256:603879aeff06df23f0d392a19f7ce02aa85e14e6b4d25fd9647b116e0cb93467'
+          - python-version: '3.8.20'
+            image: 'python:3.8.20-slim-bookworm@sha256:1d52838af602b4b5a831beb13a0e4d073280665ea7be7f69ce2382f29c5a613f'
+          - python-version: '3.9.25'
+            image: 'python:3.9.25-slim-bookworm@sha256:a02e9c5406c416c504d6c9a1a306ff4080c3173f1008d192f953bd20382a2d5c'
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Run dependency-free legacy tests
+        env:
+          LEGACY_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --pull always --network none --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            "$LEGACY_IMAGE" \
+            python -B -E -s -S -m unittest discover -s legacy_tests -p 'test_mycli_lite_legacy.py'
 
   live-mysql:
     name: Live MySQL 8.0 smoke test
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8.0
+        image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_ROOT_HOST: '%'
@@ -112,3 +183,47 @@ jobs:
           MYCLI_LITE_TEST_DATABASE: mycli_test
           MYCLI_LITE_TEST_GET_SERVER_PUBLIC_KEY: '1'
         run: uv run --frozen -- pytest -m live
+
+  legacy-live-mysql:
+    name: Legacy Python ${{ matrix.python-version }} MySQL smoke test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '2.7.18'
+            image: 'python:2.7.18-slim-buster@sha256:6c1ffdff499e29ea663e6e67c9b6b9a3b401d554d2c9f061f9a45344e3992363'
+          - python-version: '3.9.25'
+            image: 'python:3.9.25-slim-bookworm@sha256:a02e9c5406c416c504d6c9a1a306ff4080c3173f1008d192f953bd20382a2d5c'
+    services:
+      mysql:
+        image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: mycli_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=root --silent"
+          --health-interval=2s
+          --health-timeout=2s
+          --health-retries=60
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Run legacy authentication, query, and TLS smoke tests
+        env:
+          LEGACY_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --pull always --network host --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            --env MYCLI_LITE_TEST_HOST=127.0.0.1 \
+            --env MYCLI_LITE_TEST_PORT=3306 \
+            --env MYCLI_LITE_TEST_USER=root \
+            --env MYCLI_LITE_TEST_PASSWORD=root \
+            --env MYCLI_LITE_TEST_DATABASE=mycli_test \
+            "$LEGACY_IMAGE" \
+            python -B -E -s -S legacy_tests/test_live_mysql_legacy.py

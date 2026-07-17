@@ -1,6 +1,18 @@
 # mycli-lite
 
-`mycli_lite.py` is a single-file MySQL classic-protocol client for Python 3.10 through 3.14. It uses only the Python standard library and works as both a command-line program and an importable module. Direct transfer requires no installation or runtime dependency on the target.
+mycli-lite provides two single-file MySQL classic-protocol clients. Both use
+only the Python standard library and work as command-line programs or
+importable modules. Direct transfer requires no installation or runtime
+dependency on the target.
+
+| Artifact | Supported CPython | Delivery |
+| --- | --- | --- |
+| `mycli_lite.py` | 3.10 through 3.14 | GitHub raw file, wheel, and source archive |
+| `mycli_lite_legacy.py` | 2.7.9 through 2.7.18, or 3.4 through 3.9 | GitHub raw file and source archive only |
+
+Use the modern artifact whenever the target has CPython 3.10 or newer. The
+legacy artifact is a compatibility option for end-of-life interpreter lines;
+it does not restore security support to the interpreter or its linked OpenSSL.
 
 ## Transfer and run
 
@@ -11,10 +23,25 @@ $ sha256sum mycli_lite.py
 $ scp mycli_lite.py operator@target:/tmp/
 $ ssh operator@target 'chmod 700 /tmp/mycli_lite.py'
 $ ssh operator@target 'python3 /tmp/mycli_lite.py --version'
-mycli-lite 0.1.0
+mycli-lite 0.2.0
 ```
 
 It can also be executed directly after `chmod +x mycli_lite.py` when `/usr/bin/env python3` is available.
+
+On a legacy host, transfer and invoke the separate file with the available
+interpreter:
+
+```console
+$ sha256sum mycli_lite_legacy.py
+$ scp mycli_lite_legacy.py operator@target:/tmp/
+$ ssh operator@target 'python -B -E -s -S /tmp/mycli_lite_legacy.py --version'
+mycli-lite 0.2.0
+```
+
+The legacy artifact refuses to start on Python 2 releases older than 2.7.9 and
+Python 3 releases older than 3.4. CPython 2.7.18 is the Python 2 reference used
+in CI. A source archive contains the legacy file for transfer, but is not
+installable on those runtimes; extract and run the file directly.
 
 Common uses:
 
@@ -65,6 +92,11 @@ except ServerError as exc:
     print(exc.code, exc.sqlstate, exc.message)
 ```
 
+For the legacy artifact, import those names from `mycli_lite_legacy` instead.
+The constructor, methods, results, exception hierarchy, and keyword names are
+the same unless an older standard library imposes an explicit limitation
+documented below.
+
 Use `Connection(...)` directly for delayed connection. Its constructor accepts:
 
 - `host='127.0.0.1'`, `port=3306`, `user=<OS user>`, `password=''`, `database=None`, and `unix_socket=None`;
@@ -77,7 +109,7 @@ Use `Connection(...)` directly for delayed connection. Its constructor accepts:
 
 The connection is synchronous and supports `connect()`, `close()`, `ping()`, `select_db(name)`, and `query(sql)`. `execute` is an alias of `query`. A connection is a context manager and exposes `connected`, `secure`, `tls_active`, `tls_version`, `server_version`, `connection_id`, `server_capabilities`, `client_capabilities`, and `server_status`.
 
-`query()` returns a `list[Result]`, including every result set produced by a multi-statement query or stored procedure. Each `Result` contains column metadata, buffered row tuples, affected-row and last-insert IDs, warning count, status flags, and server info text. Text-protocol values are returned as `str`, binary string/blob/bit fields with binary charset metadata as `bytes`, and SQL `NULL` as `None`; values are not converted to Python numeric or date types.
+`query()` returns a `list[Result]`, including every result set produced by a multi-statement query or stored procedure. Each `Result` contains column metadata, buffered row tuples, affected-row and last-insert IDs, warning count, status flags, and server info text. On Python 3, text-protocol values are returned as `str` and binary string/blob/bit fields as `bytes`. On Python 2, the legacy artifact returns text as `unicode` and binary fields as byte `str`. SQL `NULL` is always `None`; values are not converted to Python numeric or date types.
 
 The exception hierarchy is `MySQLError`, with `MySQLConnectionError`, `AuthenticationError`, `ProtocolError`, and `ServerError`. `ServerError` exposes `code`, `sqlstate`, and `message`.
 
@@ -86,8 +118,12 @@ The exception hierarchy is `MySQLError`, with `MySQLConnectionError`, `Authentic
 ## CLI behavior
 
 ```text
-python3 mycli_lite.py [OPTIONS] [DATABASE]
+python ARTIFACT [OPTIONS] [DATABASE]
 ```
+
+Here, `ARTIFACT` is `mycli_lite.py` under a supported modern Python or
+`mycli_lite_legacy.py` under a supported legacy Python. The flags and exit
+codes are the same.
 
 Connection options:
 
@@ -162,8 +198,23 @@ Security caveats:
 - `LOAD DATA LOCAL INFILE` is never advertised or serviced. A server request aborts and closes the connection so an untrusted server cannot request a local file.
 - `connect_timeout` bounds socket setup and authentication. Successful connections return to blocking reads, so long-running queries are not cut off by that setting.
 - Each result is buffered fully in memory. The 64 MiB message limit bounds one logical protocol message, not the total size of all rows.
+- TLS protocol versions, ciphers, root certificates, and hostname verification
+  come from the interpreter and its linked OpenSSL. An old runtime may be
+  unable to negotiate with a current MySQL server. Requested TLS and
+  verification modes fail closed rather than falling back to weaker behavior.
+- On Python 2.7 and Python 3.4, the legacy artifact rejects
+  `verify-identity` when `--host` is a literal IP address because those
+  runtimes cannot safely verify IP subject alternative names. Use a DNS name
+  covered by the certificate or a newer runtime.
 
 ## Compatibility and omissions
+
+Compatibility is tested on CPython only. `mycli_lite.py` supports 3.10 through
+3.14. `mycli_lite_legacy.py` supports 2.7.9 through 2.7.18 and 3.4 through 3.9;
+2.7.18 is the Python 2 CI reference. PyPy and other implementations may work
+but are not promised. The legacy interpreter lines are end-of-life upstream,
+so using the legacy artifact does not make their standard libraries or OpenSSL
+builds secure.
 
 The module implements protocol-v10 greetings, protocol-4.1 capabilities, packet fragmentation, classic text queries, multiple statements/results, classic EOF-terminated result sets, OK/ERR packets, and explicit database selection. It is intended for MySQL 5.7/8.x and MariaDB servers that use a supported authentication plugin, but compatibility depends on the server's advertised classic-protocol behavior.
 
@@ -177,14 +228,30 @@ The strongest quick portability check starts Python without site initialization 
 
 ```console
 $ python3 -I -S ./mycli_lite.py --version
-mycli-lite 0.1.0
+mycli-lite 0.2.0
 $ python3 -I -S ./mycli_lite.py --help >/dev/null
+```
+
+The equivalent site-isolated legacy check works on every supported legacy
+interpreter:
+
+```console
+$ python -B -E -s -S ./mycli_lite_legacy.py --version
+mycli-lite 0.2.0
+$ python -B -E -s -S ./mycli_lite_legacy.py --help >/dev/null
 ```
 
 The repository unit tests use scripted sockets and cover packet framing, length-encoded fields, authentication scrambles and RSA OAEP, a full handshake/query/quit exchange, multiple results, LOCAL INFILE rejection, output escaping, REPL statement termination, and standard-library-only imports:
 
 ```console
 $ uv run -- pytest -q tests/test_mycli_lite.py
+```
+
+The dependency-free legacy suite runs with the target interpreter itself:
+
+```console
+$ python -B -E -s -S -m unittest discover -s legacy_tests \
+    -p 'test_mycli_lite_legacy.py'
 ```
 
 For an authorized live target, exercise both the chosen authentication path and transport before relying on the artifact:
@@ -194,4 +261,6 @@ $ python3 -I -S ./mycli_lite.py -h db.internal -u analyst -p \
     --ssl-mode required -e 'SELECT VERSION(); SHOW STATUS LIKE "Ssl_cipher";'
 ```
 
-Recompute and compare `sha256sum mycli_lite.py` after transfer to detect truncation or modification.
+Recompute and compare the SHA-256 of whichever artifact was transferred to
+detect truncation or modification. GitHub release `SHA256SUMS` files cover both
+standalone artifacts, both distributions, the license, and attribution.

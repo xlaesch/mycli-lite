@@ -19,9 +19,12 @@ Provide a minimal sanitized command or library example.
 
 ## Environment
 
+- Artifact (`mycli_lite.py` for CPython 3.10 through 3.14, or
+  `mycli_lite_legacy.py` for CPython 2.7.9 through 2.7.18/3.4 through 3.9):
 - mycli-lite version:
 - Artifact SHA-256:
 - Python version:
+- OpenSSL version reported by Python:
 - OS and architecture:
 - Database vendor and version:
 - Authentication plugin:

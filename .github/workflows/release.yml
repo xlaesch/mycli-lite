@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -27,16 +28,64 @@ jobs:
       - run: uv run --frozen -- ruff format --check .
       - run: uv run --frozen -- mypy mycli_lite.py tests
 
-      - name: Require tag to match module version
+      - name: Test the legacy artifact on CPython 2.7.18
+        run: |
+          docker run --rm --pull always \
+            --network none \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            python:2.7.18-slim-buster@sha256:6c1ffdff499e29ea663e6e67c9b6b9a3b401d554d2c9f061f9a45344e3992363 \
+            python -B -E -s -S -m unittest discover \
+              -s legacy_tests -p 'test_mycli_lite_legacy.py'
+
+      - name: Require tag and artifact versions to match
         run: |
           version=$(uv run --frozen -- python -c 'import mycli_lite; print(mycli_lite.__version__)')
+          legacy_version=$(uv run --frozen -- python -c 'import pathlib, re; versions = re.findall(r"^__version__ = [\x27\x22]([^\x27\x22]+)[\x27\x22]$", pathlib.Path("mycli_lite_legacy.py").read_text(encoding="utf-8"), re.MULTILINE); assert len(versions) == 1; print(versions[0])')
           test "${GITHUB_REF_NAME}" = "v${version}"
+          test "${legacy_version}" = "${version}"
 
-      - name: Build distributions and checksums
+      - name: Build distributions
         run: |
           uv build
-          sha256sum mycli_lite.py LICENSE.txt ATTRIBUTION.md > SHA256SUMS
+
+      - name: Verify distribution boundaries
+        run: |
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          test -n "${wheel}"
+          test -n "${sdist}"
+          unzip -Z1 "${wheel}" > /tmp/wheel-files
+          tar -tzf "${sdist}" > /tmp/sdist-files
+          if grep -Fxq 'mycli_lite_legacy.py' /tmp/wheel-files; then
+            echo 'The legacy artifact must not be packaged in the wheel.' >&2
+            exit 1
+          fi
+          grep -Eq '/mycli_lite_legacy\.py$' /tmp/sdist-files
+          metadata=$(grep '/METADATA$' /tmp/wheel-files)
+          unzip -p "${wheel}" "${metadata}" > /tmp/wheel-metadata
+          grep -Fxq 'Requires-Python: >=3.10' /tmp/wheel-metadata
+          grep -Fxq 'Classifier: Private :: Do Not Upload' /tmp/wheel-metadata
+          entry_points=$(grep '/entry_points.txt$' /tmp/wheel-files)
+          unzip -p "${wheel}" "${entry_points}" | grep -Fxq 'mycli-lite = mycli_lite:_main_entrypoint'
+
+      - name: Create checksums
+        run: |
+          sha256sum mycli_lite.py mycli_lite_legacy.py LICENSE.txt ATTRIBUTION.md > SHA256SUMS
           (cd dist && sha256sum * >> ../SHA256SUMS)
+
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="${version}" '
+            index($0, "## " version " ") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -44,13 +93,15 @@ jobs:
           path: |
             dist/*
             mycli_lite.py
+            mycli_lite_legacy.py
             LICENSE.txt
             ATTRIBUTION.md
             SHA256SUMS
+            RELEASE_NOTES.md
           if-no-files-found: error
 
   release-assets:
-    name: Attach standalone artifact
+    name: Create GitHub release
     runs-on: ubuntu-latest
     needs: build
     permissions:
@@ -61,15 +112,24 @@ jobs:
         with:
           name: release-artifacts
           path: release-artifacts
-      - name: Upload files to the GitHub release
+      - name: Create release and upload files
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            release-artifacts/mycli_lite.py \
-            release-artifacts/LICENSE.txt \
-            release-artifacts/ATTRIBUTION.md \
-            release-artifacts/SHA256SUMS \
-            release-artifacts/dist/* \
-            --clobber
+          assets=(
+            release-artifacts/mycli_lite.py
+            release-artifacts/mycli_lite_legacy.py
+            release-artifacts/LICENSE.txt
+            release-artifacts/ATTRIBUTION.md
+            release-artifacts/SHA256SUMS
+            release-artifacts/dist/*
+          )
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+              --verify-tag \
+              --title "mycli-lite ${GITHUB_REF_NAME}" \
+              --notes-file release-artifacts/RELEASE_NOTES.md
+          fi
