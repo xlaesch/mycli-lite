@@ -1,213 +1,125 @@
-# mycli
+# mycli-lite
 
-[![Build Status](https://github.com/dbcli/mycli/workflows/mycli/badge.svg)](https://github.com/dbcli/mycli/actions?query=workflow%3Amycli)
+`mycli-lite` is a dependency-free MySQL client for constrained hosts. It is a
+single Python file that can be copied to a machine with Python 3.10 through 3.14 and
+used immediately as either a CLI or a small synchronous library.
 
-A command line client for MySQL with auto-completion and syntax highlighting.
+The project is aimed at authorized penetration tests, incident response, and
+other environments where installing a full database client is impractical.
 
-Homepage: [https://mycli.net](https://mycli.net)
-Documentation: [https://mycli.net/docs](https://mycli.net/docs)
+## Quick start
 
-![Completion](doc/screenshots/tables.png)
-![CompletionGif](doc/screenshots/main.gif)
-
-Mycli is compatible with MySQL, MariaDB, Percona, TiDB, and Apache Doris.
-
-Postgres Equivalent: [https://pgcli.com](https://pgcli.com)
-
-Release 2.x
------------
-
-Release 2.0.0 has [breaking changes](https://github.com/dbcli/mycli/blob/v2.0.0/changelog.md#breaking-changes)!
-
-
-Quick Start
------------
-
-If you already know how to install Python packages, then you can install mycli
-via `pip`.  This package is always up to date.
-
-You might need `sudo` on Linux.
+Copy the artifact and run it directly:
 
 ```bash
-pip install --upgrade 'mycli[all]'
+scp mycli_lite.py operator@target:/tmp/
+ssh operator@target 'python3 -I -S /tmp/mycli_lite.py --version'
 ```
 
-or, only on macOS (`fzf` and `pygments` are optional but recommended):
+Connect interactively:
 
 ```bash
-brew update && brew install mycli fzf pygments
+python3 mycli_lite.py -h db.internal -u analyst -p inventory
 ```
 
-or, only on Debian or Ubuntu (`fzf` and `pygments` are optional but recommended):
+Execute a query without putting the password in the process arguments:
 
 ```bash
-sudo apt-get install mycli fzf python3-pygments
+export DB_PASSWORD='replace-me'
+python3 mycli_lite.py \
+  -h db.internal -u analyst --password-env DB_PASSWORD \
+  -e 'SELECT VERSION(), CURRENT_USER();'
 ```
 
-### Usage
-
-See
+From a cloned GitHub fork, the same module and `mycli-lite` command can
+optionally be installed into an isolated environment:
 
 ```bash
-mycli --help
+uv tool install .
+mycli-lite --version
 ```
 
-Features
---------
+Direct transfer never requires package installation or network access on the
+target.
 
-* Auto-completion as you type for SQL keywords as well as tables, views,
-  columns, enums, and more!
-* Fuzzy history search using [fzf](https://github.com/junegunn/fzf).
-* Output explorer using [fzf](https://github.com/junegunn/fzf) or other tools.
-* Syntax highlighting using [Pygments](https://pygments.org/).
-* Smart-completion (enabled by default) will suggest context-sensitive completion.
-    - `SELECT * FROM <tab>` will only show table names.
-    - `SELECT * FROM users WHERE <tab>` will only show column names.
-* Support for multiline queries.
-* Favorite queries with optional positional parameters. Save a query using
-  `/fs <alias> <query>` and execute it with `/f <alias>`.
-* Timing of sql statements and table rendering.
-* Log every query and its results to a file (disabled by default).
-* Pretty print tabular data (with colors!).
-* Support for SSL connections
-* Shell-style trailing redirects with `$>`, `$>>` and `$|` operators.
-* Support for querying LLMs with context derived from your schema using `/llm`.
-* Support for storing passwords in the system keyring.
+## Included
 
-Mycli creates a config file `~/.myclirc` on the first run; you can use the
-options in that file to configure the above features, and more.
+- MySQL classic-protocol v10 handshakes and text queries.
+- TCP, IPv4/IPv6, and explicit Unix-domain sockets.
+- TLS modes from opportunistic encryption through CA and hostname validation.
+- `mysql_native_password`, `caching_sha2_password`, and `sha256_password`.
+- Secure SHA-2 authentication over TLS or with a pinned/requested RSA key.
+- Multiple statements and result sets.
+- Table, TSV, CSV, and vertical output.
+- A small REPL and an importable `Connection` API.
+- Packet fragmentation, size limits, strict sequence checks, and safe terminal
+  escaping.
 
-Some features are only exposed as [key bindings](doc/key_bindings.rst).
+## Deliberately omitted
 
+The single-file constraint means there is no completion, syntax highlighting,
+history, configuration discovery, keyring, SSH tunnel, pager, editor, LLM,
+plugin system, ORM, parameter binding, prepared statements, streaming cursor,
+or `LOCAL INFILE` support.
 
-Implementation
---------------
+All result rows are buffered in memory. Library callers must construct SQL
+safely; this project is not a query builder and does not make string
+interpolation safe.
 
-`mycli` is written using [prompt_toolkit](https://github.com/jonathanslenders/python-prompt-toolkit/) and other Python libraries.
+See the [usage and security guide](docs/usage.md) for the full CLI reference,
+library API, authentication behavior, and compatibility boundaries.
 
+## Library example
 
-Contributions
--------------
+```python
+from mycli_lite import connect
 
-If you're interested in contributing to this project, first of all we would like
-to extend our heartfelt gratitude. We've written a small doc to describe how to
-get mycli running in a development setup.
+with connect(
+    host='db.internal',
+    user='analyst',
+    password='secret',
+    database='inventory',
+    ssl_mode='required',
+) as connection:
+    for result in connection.query('SELECT id, hostname FROM assets LIMIT 20'):
+        print(result.rows)
+```
 
-https://github.com/dbcli/mycli/blob/main/CONTRIBUTING.md
+## Security posture
 
+- `LOAD DATA LOCAL INFILE` is never advertised or serviced.
+- Cleartext authentication requires explicit opt-in and secure transport.
+- SHA-2 full authentication fails closed on plaintext TCP unless an RSA-key
+  mode was explicitly selected.
+- `verify-identity` should be used with a trusted CA when server identity
+  matters. The default `preferred` mode does not prevent TLS downgrade or
+  authenticate the server.
+- Use this software only on systems you own or are explicitly authorized to
+  assess.
 
-## Additional Install Instructions:
+Security issues should be reported according to [SECURITY.md](SECURITY.md).
 
-These are some alternative ways to install mycli that are not managed by our
-team but provided by OS package maintainers.  OS packages could be somewhat
-out of date.
-
-If present, the `fzf` package can be used for fuzzy history search, and as an
-output "explorer" with the `\x` special command. `pygemtize` can be used for
-syntax highlighting within the fuzzy history search.  The `less` package is
-also expected, but almost always already installed.
-
-### Arch, Manjaro
-
-You can install the `mycli` package available in the AUR.  `fzf` and
-`python-pygments` are optional but recommended:
+## Development
 
 ```bash
-yay -S mycli fzf python-pygments
+uv sync --group dev
+uv run -- pytest -m 'not live'
+uv run -- ruff check .
+uv run -- ruff format --check .
+uv run -- mypy mycli_lite.py tests
+uv build
 ```
 
-### Debian, Ubuntu
+The project supports Python 3.10 through 3.14. Runtime imports must remain
+standard-library-only, and `mycli_lite.py` must remain independently
+transferable.
 
-On Debian and Ubuntu distributions, you can easily install the mycli package
-using apt.  The `fzf` and `python3-pygments` packages are optional but
-recommended:
+## Independent fork
 
-```bash
-sudo apt-get install mycli fzf python3-pygments
-```
+This project is derived from [mycli](https://github.com/dbcli/mycli) but is not
+affiliated with, sponsored by, or endorsed by the mycli or dbcli maintainers.
+The implementations now have intentionally different scope and architecture.
+See [ATTRIBUTION.md](ATTRIBUTION.md) and [LICENSE.txt](LICENSE.txt).
 
-### Fedora
-
-Fedora has a package available for mycli; install it using dnf.  The `fzf` and
-`python-pygments` packages are optional but recommended:
-
-```bash
-sudo dnf install mycli fzf python-pygments
-```
-
-### Windows
-
-#### Option 1: Native Windows
-
-Install the `less` pager, for example by `scoop install less`.
-
-Install the `fzf` fuzzy finder, for example by `scoop install fzf`.
-
-Follow the instructions on this blog post: https://web.archive.org/web/20221006045208/https://www.codewall.co.uk/installing-using-mycli-on-windows/
-
-The libraries used in mycli are Windows-compatible, but there are known
-limitations according to the test suite.  The basics work without any
-modifications, but this configuration isn't supported software at this time.
-
-PRs to address shortcomings on Windows would be welcome!
-
-#### Option 2: WSL
-
-Mycli is more compatible with WSL than with native Windows, though still
-not 100% perfect.  This is a good option for using mycli on Windows.
-
-With WSL, you are probably using an Ubuntu distribution, in which case
-recommended dependencies can be installed by
-
-```bash
-sudo apt-get install fzf python3-pygments
-```
-
-and mycli can be installed by `apt-get` or by `pip` (recommended):
-
-```bash
-pip install --upgrade 'mycli[all]'
-```
-
-PRs to complete WSL support would be welcome!
-
-### Thanks
-
-This project was funded through Kickstarter. Our thanks to the [backers](https://mycli.net/sponsors) who supported the project.
-
-A special thanks to [Jonathan Slenders](https://twitter.com/jonathan_s) for
-creating [Python Prompt Toolkit](https://github.com/jonathanslenders/python-prompt-toolkit),
-which is quite literally the backbone library, that made this app possible.
-Jonathan has also provided valuable feedback and support during the development
-of this app.
-
-[Click](https://palletsprojects.com/projects/click) is used for command line option parsing
-and printing error messages.
-
-Thanks to [PyMysql](https://github.com/PyMySQL/PyMySQL) for a pure Python adapter to MySQL databases.
-
-
-### Compatibility
-
-Mycli is tested on macOS (full), Linux (full), Windows (partial), and WSL
-(partial), and requires Python 3.10 or better.
-
-To connect to MySQL versions earlier than 5.5, you may need to set the
-following in `~/.myclirc`:
-
-```ini
-[connection]
-# character set for connections without --charset being set at the CLI
-default_character_set = utf8
-```
-
-or set `--charset=utf8` when invoking mycli
-
-### Configuration and Usage
-
-For more information on using and configuring mycli, [check out our documentation](https://mycli.net/docs).
-
-Common topics include:
-- [Configuring mycli](https://mycli.net/config)
-- [Using/Disabling the pager](https://mycli.net/pager)
-- [Syntax colors](https://mycli.net/syntax)
+MySQL is a trademark of Oracle and/or its affiliates. This project is not
+affiliated with or endorsed by Oracle.

@@ -1,31 +1,33 @@
 ---
 name: Bug report
-about: Create a report to help us improve
+about: Report a reproducible mycli-lite defect
 title: ''
-labels: ''
+labels: bug
 assignees: ''
-
 ---
 
-<!-- You can delete any parts of this template not applicable to your issue. -->
+Do not include credentials, private hostnames, customer data, or sensitive query
+output.
 
-### Suggested troubleshooting steps for bug reports
+## Expected behavior
 
- * [ ] Upgraded to the latest mycli if possible.
- * [ ] Ran `mycli --checkup`, if supported.
+## Actual behavior
 
-### Expected Behavior
+## Reproduction
 
+Provide a minimal sanitized command or library example.
 
-### Actual Behavior
+## Environment
 
+- mycli-lite version:
+- Artifact SHA-256:
+- Python version:
+- OS and architecture:
+- Database vendor and version:
+- Authentication plugin:
+- TCP or Unix socket:
+- TLS mode:
 
-### Steps to Reproduce
+## Additional context
 
-
-### System
-
- * mycli version:
- * OS/version:
-
-### Discussion
+Include a sanitized traceback or packet-level detail when relevant.

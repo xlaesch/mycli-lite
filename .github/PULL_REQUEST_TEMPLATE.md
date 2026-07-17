@@ -1,13 +1,17 @@
-## Description
-<!--- Describe your changes in detail. -->
+## Summary
 
+## Test evidence
 
+- [ ] Unit tests pass on the affected Python versions.
+- [ ] Ruff formatting and lint checks pass.
+- [ ] Mypy passes.
+- [ ] `python -I -S mycli_lite.py --version` succeeds.
+- [ ] The change adds no runtime dependency.
+- [ ] Protocol or security behavior has regression coverage.
+- [ ] User-visible behavior is documented in `CHANGELOG.md`.
+- [ ] Copied or derived code includes its provenance and compatible license.
 
-## Checklist
-<!--- We appreciate your help and want to give you credit. Place an `x` in the boxes below as you complete them. -->
-- [ ] I added this contribution to the `changelog.md` file.
-- [ ] I added my name to the `AUTHORS` file (or it's already there).
-- [ ] To lint and format the code, I ran
-    ```bash
-    uv run ruff check && uv run ruff format && uv run mypy --install-types .
-    ```
+## Scope impact
+
+Describe the effect on artifact size, supported servers, authentication, and
+security boundaries.

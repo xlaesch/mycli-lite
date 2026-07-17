@@ -1,133 +1,40 @@
-# MyCli
+# mycli-lite
 
-A command line client for MySQL with auto-completion and syntax highlighting.
+A dependency-free, single-file MySQL client and CLI.
 
-## Project Structure
+## Project structure
 
-/                                         # repository root
-├── .github/                              # GitHub Actions and configuration
-├── pyproject.toml                        # project configuration
-├── doc/                                  # documentation
-├── mycli/                                # application source
-├── mycli/__init__.py                     # provides version number
-├── mycli/app_state.py                    # `AppStateMixin` application state mixin and related functions
-├── mycli/cli_runner.py                   # connects and dispatches main modes based on CLI arguments
-├── mycli/clibuffer.py                    # prompt_toolkit buffer utilities
-├── mycli/client_commands.py              # special commands which must be registered separately
-├── mycli/client_connection.py            # `ClientConnectionMixin` mixin for establishing the database connection
-├── mycli/client_query.py                 # `ClientQueryMixin` mixin for running queries and refreshing completions
-├── mycli/client.py                       # the `MyCli` "god class"
-├── mycli/clistyle.py                     # prompt_toolkit style utilities
-├── mycli/clitoolbar.py                   # prompt_toolkit toolbar utilities
-├── mycli/compat.py                       # OS compatibility helpers
-├── mycli/completion_refresher.py         # populates a `SQLCompleter` object in a background thread
-├── mycli/config.py                       # configuration file readers and utilities
-├── mycli/constants.py                    # shared constants
-├── mycli/key_bindings.py                 # prompt_toolkit key binding utilities
-├── mycli/lexer.py                        # extends `MySqlLexer` from Pygments
-├── mycli/main.py                         # processes CLI arguments
-├── mycli/main_modes/                     # main execution paths
-├── mycli/main_modes/batch.py             # `--batch` mode
-├── mycli/main_modes/checkup.py           # `--checkup` mode
-├── mycli/main_modes/execute.py           # `--execute` mode
-├── mycli/main_modes/list_dsn.py          # `--list-dsn` mode
-├── mycli/main_modes/repl.py              # interactive REPL mode
-├── mycli/myclirc                         # project-level configuration file
-├── mycli/output.py                       # `OutputMixin` mixin for feedback and output of query results
-├── mycli/packages/                       # application packages
-├── mycli/packages/batch_utils.py         # utilities for `--batch` mode
-├── mycli/packages/cli_utils.py           # utilities for parsing CLI arguments
-├── mycli/packages/completion_engine.py   # implementation of completion suggestions
-├── mycli/packages/filepaths.py           # utilities for files, including completion suggestions
-├── mycli/packages/hybrid_redirection.py  # implementation of shell-style redirects
-├── mycli/packages/interactive_utils.py   # utilities for confirming on destructive statements
-├── mycli/packages/key_binding_utils.py   # handlers for key bindings and related special commands
-├── mycli/packages/sql_utils.py           # utilities for parsing SQL statements
-├── mycli/packages/ptoolkit/              # extends prompt_toolkit
-├── mycli/packages/special/               # implementation of mycli special commands
-├── mycli/packages/sqlresult.py           # the `SQLResult` dataclass for holding responses
-├── mycli/packages/string_utils.py        # generic string utilities
-├── mycli/packages/tabular_output/        # extends cli_helper with additional output formats
-├── mycli/schema_prefetcher.py            # background prefetcher for multi-schema auto-completion
-├── mycli/sqlcompleter.py                 # offers SQL completions
-├── mycli/sqlexecute.py                   # runs SQL queries
-├── mycli/types.py                        # shared types
-├── mycli/vault.py                        # Vault integration
-├── test/features/                        # behave tests
-├── test/myclirc                          # mycli configuration used for tests
-├── test/mylogin.cnf                      # `mylogin.cnf` example used for tests
-├── test/pytests/                         # pytest tests
-├── test/pytests/conftest.py              # pytest configuration
-└── test/utils.py                         # shared utilities for tests
-
-## Development
-
-### Python
-
-#### Python Dependency Management
-
-This repo uses `uv` for dependency management. **Always** prefix Python
-commands with `uv run`.  Example:
-
-```bash
-uv run -- python script.py
+```text
+mycli_lite.py              Runtime module and executable artifact.
+tests/                     Protocol, CLI, output, and optional live tests.
+docs/usage.md              Detailed user and security documentation.
+pyproject.toml             Package and development configuration.
+.github/workflows/         CI and GitHub release workflows.
 ```
 
-#### Python Typing
+## Development rules
 
-This repo uses type annotations which are checked by `mypy`.  **Always** add
-type annotations, and always check new code with `uv run -- mypy --install-types --non-interactive script.py`.
+- Preserve Python 3.10 through 3.14 compatibility.
+- Keep `mycli_lite.py` standard-library-only and independently executable.
+- Add type annotations to new Python code.
+- Prefer lower-case built-in generics and `Type | None` unions.
+- Prefer single quotes in new code.
+- Keep comments concise, direct, and punctuated as full sentences.
+- Do not restore dependencies or functionality from full mycli unless it fits
+  the single-file scope.
 
-Use lower-case type annotations such as `tuple`, not upper-case type
-annotations such as `Tuple`.
+Use uv for Python commands:
 
-Use `Type | None` instead of `Optional[Type]`.
+```bash
+uv run -- pytest -m 'not live'
+uv run -- ruff check .
+uv run -- ruff format .
+uv run -- mypy mycli_lite.py tests
+uv build
+```
 
-#### Python Testing
+Before a release, verify the wheel contains only `mycli_lite.py`, distribution
+metadata, the console entry point, and the license. Test the raw artifact with
+`python -I -S` to prove it does not import site packages.
 
-Tests are coordinated by `tox`, and include both `pytest` and `behave` tests.
-To run the full test suite, execute `uv run -- tox`.
-
-#### Python Compatibility
-
-Use Python features available from Python 3.10 through Python 3.14.
-Compatibility with Python 3.9 is not needed.
-
-#### Python Style
-
-Import style: prefer `from package import name` over `import package.name as name`.
-
-Quoting style: prefer single quotes for new code, but do not remove double quotes
-from existing code.
-
-#### Python Environment
-
- * Package manager: `uv` (not pip)
- * Formatter: `uv run -- ruff format`
- * Linter: `uv run -- ruff check`
- * Type checker: `uv run -- mypy --install-types --non-interactive`
-
-### Git Workflows
-
-#### Git Commit Messages
-
- * Use the present tense.
- * Keep the first line under 50 characters in length.
- * Keep the second line blank.
- * Keep all other lines under 72 characters in length.
- * Reference issue numbers when available.
-
-#### Generating PRs
-
-When generating a PR, follow the instructions in `.github/PULL_REQUEST_TEMPLATE.md`:
-
- * Add new author names to `mycli/AUTHORS`.
- * Add a new entry to `changelog.md`.
-
-### Code Comments
-
-Keep comments concise and direct.  Use full sentences, ending with a period.
-
-### See Also
-
-See also the file `CONTRIBUTING.md`.
+Preserve `LICENSE.txt`, the embedded license header, and `ATTRIBUTION.md`.

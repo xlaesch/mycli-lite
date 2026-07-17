@@ -1,24 +1,21 @@
 .idea/
 .vscode/
-/build
-/dist
-/mycli.egg-info
-/src
-/test/behave.ini
 
-.vagrant
-*.pyc
-*.deb
-.cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
 .coverage
-.coverage.*
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
 .tox/
-
 .venv/
 venv/
 
-.myclirc
-uv.lock
+build/
+dist/
+
+.env
+.env.*
+*.pem
